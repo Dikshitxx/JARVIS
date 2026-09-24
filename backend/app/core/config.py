@@ -15,3 +15,18 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 ALLOWED_DIRS = [DATA_DIR]  # folders the assistant may read; add more deliberately later
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+ALLOWED_COMMANDS = [
+	"python --version",
+	"node --version",
+	"npm --version",
+	"git --version",
+	"git status",
+	"git branch",
+	"git log --oneline -n 5",
+	"pip list",
+	"ollama list",
+	"ollama ps",
+]

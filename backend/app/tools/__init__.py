@@ -1,1 +1,1 @@
-from app.tools import basic, files  # noqa: F401
+from app.tools import basic, files, terminal  # noqa: F401

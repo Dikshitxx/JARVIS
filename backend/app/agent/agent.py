@@ -25,6 +25,7 @@ class Agent:
 
         for _ in range(MAX_TOOL_STEPS):
             msg = client.chat(messages, tools=get_schemas())
+            print(f"[agent] tool_calls={msg.tool_calls} content={msg.content!r}", flush=True)
             calls = []
             if msg.tool_calls:
                 calls = [(c.function.name, dict(c.function.arguments or {})) for c in msg.tool_calls]
@@ -44,6 +45,7 @@ class Agent:
             messages.append({"role": "assistant", "content": msg.content or ""})
             for name, args in calls:
                 result = run_tool(name, args)
+                print(f"[agent] ran {name} {args} -> {result[:200]!r}", flush=True)
                 log.info("Tool %s -> %s", name, result)
                 messages.append({"role": "tool", "content": result, "tool_name": name})
 

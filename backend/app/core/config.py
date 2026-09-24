@@ -46,3 +46,9 @@ ALLOWED_APPS = {
 		"brave",
 	],
 }
+
+BLOCKED_APP_TERMS = [
+	"cmd", "command prompt", "powershell", "pwsh", "terminal", "regedit", "registry",
+	"wsl", "bash", "windows security", "group policy", "task scheduler", "services",
+	"uninstall", "setup", "installer",
+]

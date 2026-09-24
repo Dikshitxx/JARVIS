@@ -12,6 +12,7 @@ class Tool:
     parameters: dict
     func: Callable
     risk: str = "safe"  # "safe" | "confirm" | "blocked"
+    needs_confirm: Callable | None = None
 
 
 REGISTRY: dict[str, Tool] = {}
@@ -50,7 +51,8 @@ def run_tool(name: str, args: dict, confirmed: bool = False) -> str:
         return f"Error: tool '{name}' does not exist."
     if tool.risk == "blocked":
         return f"Error: tool '{name}' is disabled."
-    if tool.risk == "confirm" and not confirmed:
+    must_confirm = tool.risk == "confirm" or (tool.needs_confirm is not None and tool.needs_confirm(args or {}))
+    if must_confirm and not confirmed:
         raise NeedsConfirmation(name, args or {})
     try:
         log.info("Running tool %s with %s (confirmed=%s)", name, args, confirmed)

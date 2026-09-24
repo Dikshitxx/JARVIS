@@ -52,3 +52,5 @@ BLOCKED_APP_TERMS = [
 	"wsl", "bash", "windows security", "group policy", "task scheduler", "services",
 	"uninstall", "setup", "installer",
 ]
+
+SCREENSHOT_DIR = DATA_DIR / "screenshots"

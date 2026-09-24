@@ -15,6 +15,7 @@ def build_system_prompt() -> str:
         "After a tool returns, tell the user plainly what happened, using the tool's result. "
         "When the user asks you to open an application, call the open_app tool. "
         "When the user asks you to close an application, call the close_app tool. "
+        "When the user asks for a screenshot, call the take_screenshot tool. "
         "Never claim you performed an action unless a tool confirmed it. "
         "If you don't know something, say so."
     )

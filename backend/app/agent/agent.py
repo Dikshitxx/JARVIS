@@ -10,6 +10,7 @@ from app.tools.registry import REGISTRY, get_schemas, run_tool
 log = logging.getLogger("jarvis.agent")
 
 MAX_TOOL_STEPS = 4
+DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories"}
 
 
 class Agent:
@@ -24,7 +25,16 @@ class Agent:
         reply = "I couldn't complete that request."
 
         for _ in range(MAX_TOOL_STEPS):
-            msg = client.chat(messages, tools=get_schemas())
+            msg = None
+            for attempt in range(2):
+                try:
+                    msg = client.chat(messages, tools=get_schemas())
+                    break
+                except Exception as e:
+                    print(f"[agent] model error (attempt {attempt + 1}): {e}", flush=True)
+            if msg is None:
+                reply = "Sorry boss, I could not process that. Try rephrasing, or give me one fact at a time."
+                break
             print(f"[agent] tool_calls={msg.tool_calls} content={msg.content!r}", flush=True)
             calls = []
             if msg.tool_calls:
@@ -43,11 +53,16 @@ class Agent:
                 break
 
             messages.append({"role": "assistant", "content": msg.content or ""})
+            results = []
             for name, args in calls:
                 result = run_tool(name, args)
+                results.append((name, result))
                 print(f"[agent] ran {name} {args} -> {result[:200]!r}", flush=True)
                 log.info("Tool %s -> %s", name, result)
                 messages.append({"role": "tool", "content": result, "tool_name": name})
+            if all(n in DIRECT_REPLY_TOOLS for n, _ in results):
+                reply = "\n".join(r for _, r in results)
+                break
 
         self.history.append({"role": "assistant", "content": reply})
         return reply

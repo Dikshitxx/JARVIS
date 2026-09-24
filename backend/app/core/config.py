@@ -30,3 +30,6 @@ ALLOWED_COMMANDS = [
 	"ollama list",
 	"ollama ps",
 ]
+
+DB_PATH = DATA_DIR / "jarvis.db"
+MAX_MEMORIES_IN_PROMPT = 30

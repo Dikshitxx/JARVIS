@@ -10,3 +10,8 @@ OWNER_NAME = os.getenv("OWNER_NAME", "Boss")
 
 MAX_HISTORY_MESSAGES = 10   # keeps RAM/context small
 NUM_CTX = 2048              # small context window for 8 GB RAM
+
+from pathlib import Path
+
+DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+ALLOWED_DIRS = [DATA_DIR]  # folders the assistant may read; add more deliberately later

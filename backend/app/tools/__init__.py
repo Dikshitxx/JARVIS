@@ -1,1 +1,1 @@
-from app.tools import basic  # noqa: F401  (registers the tools on import)
+from app.tools import basic, files  # noqa: F401

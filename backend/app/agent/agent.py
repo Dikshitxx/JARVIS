@@ -1,10 +1,11 @@
+import json
 import logging
 
 from app import tools  # noqa: F401  (loads and registers tools)
 from app.agent.prompts import build_system_prompt
 from app.core import config
 from app.llm import client
-from app.tools.registry import get_schemas, run_tool
+from app.tools.registry import REGISTRY, get_schemas, run_tool
 
 log = logging.getLogger("jarvis.agent")
 
@@ -24,13 +25,24 @@ class Agent:
 
         for _ in range(MAX_TOOL_STEPS):
             msg = client.chat(messages, tools=get_schemas())
-            if not msg.tool_calls:
+            calls = []
+            if msg.tool_calls:
+                calls = [(c.function.name, dict(c.function.arguments or {})) for c in msg.tool_calls]
+            else:
+                # 3B fallback: model wrote the call as JSON text instead of calling it
+                try:
+                    data = json.loads(msg.content or "")
+                    if isinstance(data, dict) and data.get("name") in REGISTRY:
+                        calls = [(data["name"], data.get("parameters") or data.get("arguments") or {})]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if not calls:
                 reply = msg.content or ""
                 break
-            messages.append(msg)
-            for call in msg.tool_calls:
-                name = call.function.name
-                args = dict(call.function.arguments or {})
+
+            messages.append({"role": "assistant", "content": msg.content or ""})
+            for name, args in calls:
                 result = run_tool(name, args)
                 log.info("Tool %s -> %s", name, result)
                 messages.append({"role": "tool", "content": result, "tool_name": name})

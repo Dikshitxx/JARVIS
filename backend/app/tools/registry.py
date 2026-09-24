@@ -36,16 +36,24 @@ def get_schemas() -> list[dict]:
     ]
 
 
-def run_tool(name: str, args: dict) -> str:
+class NeedsConfirmation(Exception):
+    def __init__(self, tool_name: str, tool_args: dict):
+        super().__init__(f"{tool_name} needs confirmation")
+        self.tool_name = tool_name
+        self.tool_args = tool_args
+
+
+def run_tool(name: str, args: dict, confirmed: bool = False) -> str:
     tool = REGISTRY.get(name)
     if tool is None:
         log.warning("Model asked for unknown tool: %s", name)
         return f"Error: tool '{name}' does not exist."
-    if tool.risk != "safe":
-        log.warning("Tool %s needs confirmation (not implemented yet)", name)
-        return f"Error: tool '{name}' requires user confirmation, which is not available yet."
+    if tool.risk == "blocked":
+        return f"Error: tool '{name}' is disabled."
+    if tool.risk == "confirm" and not confirmed:
+        raise NeedsConfirmation(name, args or {})
     try:
-        log.info("Running tool %s with %s", name, args)
+        log.info("Running tool %s with %s (confirmed=%s)", name, args, confirmed)
         return str(tool.func(**(args or {})))
     except Exception as e:
         log.exception("Tool %s failed", name)

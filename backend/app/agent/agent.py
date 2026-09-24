@@ -5,24 +5,56 @@ from app import tools  # noqa: F401  (loads and registers tools)
 from app.agent.prompts import build_system_prompt
 from app.core import config
 from app.llm import client
-from app.tools.registry import REGISTRY, get_schemas, run_tool
+from app.tools.registry import REGISTRY, NeedsConfirmation, get_schemas, run_tool
 
 log = logging.getLogger("jarvis.agent")
 
 MAX_TOOL_STEPS = 4
-DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories", "open_app"}
+DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories", "open_app", "close_app"}
+YES = {"yes", "y", "yeah", "yep", "confirm", "confirmed", "do it", "go ahead"}
+NO = {"no", "n", "nope", "cancel", "stop", "dont", "don't"}
 
 
 class Agent:
     def __init__(self):
-        self.history: list[dict] = []  # only user/assistant text is kept between turns
+        self.history: list[dict] = []
+        self.pending: tuple[str, dict] | None = None  # action waiting for the user's yes/no
+
+    def _remember_turn(self, user_text: str, reply: str) -> None:
+        self.history.append({"role": "user", "content": user_text})
+        self.history.append({"role": "assistant", "content": reply})
+        self.history = self.history[-config.MAX_HISTORY_MESSAGES:]
+
+    def _handle_pending(self, user_text: str) -> str | None:
+        answer = user_text.strip().lower().strip(" .!")
+        name, args = self.pending
+        self.pending = None  # any message resolves or drops the pending action
+        if answer in YES:
+            print(f"[agent] CONFIRMED {name} {args}", flush=True)
+            return run_tool(name, args, confirmed=True)
+        if answer in NO:
+            return "Cancelled. Nothing was done."
+        return None  # not an answer: the pending action is dropped, continue normally
 
     def respond(self, user_text: str) -> str:
+        bare = user_text.strip().lower().strip(" .!")
+        if not self.pending and (bare in YES or bare in NO):
+            reply = "There is nothing waiting for your confirmation."
+            self._remember_turn(user_text, reply)
+            return reply
+
+        if self.pending:
+            outcome = self._handle_pending(user_text)
+            if outcome is not None:
+                self._remember_turn(user_text, outcome)
+                return outcome
+
         self.history.append({"role": "user", "content": user_text})
         self.history = self.history[-config.MAX_HISTORY_MESSAGES:]
 
         messages = [{"role": "system", "content": build_system_prompt()}] + self.history
         reply = "I couldn't complete that request."
+        finished = False
 
         for _ in range(MAX_TOOL_STEPS):
             msg = None
@@ -36,11 +68,11 @@ class Agent:
                 reply = "Sorry boss, I could not process that. Try rephrasing, or give me one fact at a time."
                 break
             print(f"[agent] tool_calls={msg.tool_calls} content={msg.content!r}", flush=True)
+
             calls = []
             if msg.tool_calls:
                 calls = [(c.function.name, dict(c.function.arguments or {})) for c in msg.tool_calls]
             else:
-                # 3B fallback: model wrote the call as JSON text instead of calling it
                 try:
                     data = json.loads(msg.content or "")
                     if isinstance(data, dict) and data.get("name") in REGISTRY:
@@ -55,20 +87,32 @@ class Agent:
             messages.append({"role": "assistant", "content": msg.content or ""})
             results = []
             for name, args in calls:
-                result = run_tool(name, args)
-                results.append((name, result))
+                try:
+                    result = run_tool(name, args)
+                except NeedsConfirmation as need:
+                    self.pending = (need.tool_name, need.tool_args)
+                    reply = f"Confirm: {need.tool_name} {need.tool_args}? Reply 'yes' or 'no'."
+                    finished = True
+                    break
                 print(f"[agent] ran {name} {args} -> {result[:200]!r}", flush=True)
-                log.info("Tool %s -> %s", name, result)
                 messages.append({"role": "tool", "content": result, "tool_name": name})
-            if all(n in DIRECT_REPLY_TOOLS for n, _ in results):
+                results.append((name, result))
+
+            if finished:
+                break
+            if results and all(n in DIRECT_REPLY_TOOLS for n, _ in results):
                 reply = "\n".join(r for _, r in results)
                 break
 
-        self.history.append({"role": "assistant", "content": reply})
+        self._remember_turn_reply(reply)
         return reply
+
+    def _remember_turn_reply(self, reply: str) -> None:
+        self.history.append({"role": "assistant", "content": reply})
 
     def reset(self):
         self.history.clear()
+        self.pending = None
 
 
 agent = Agent()

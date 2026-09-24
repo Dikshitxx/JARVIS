@@ -33,3 +33,16 @@ ALLOWED_COMMANDS = [
 
 DB_PATH = DATA_DIR / "jarvis.db"
 MAX_MEMORIES_IN_PROMPT = 30
+
+# name -> list of candidate executables (first one that exists is used)
+ALLOWED_APPS = {
+	"notepad": ["notepad.exe"],
+	"calculator": ["calc.exe"],
+	"explorer": ["explorer.exe"],
+	"vscode": ["code", r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"],
+	"brave": [
+		r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+		r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe",
+		"brave",
+	],
+}

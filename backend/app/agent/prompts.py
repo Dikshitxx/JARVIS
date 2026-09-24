@@ -13,6 +13,7 @@ def build_system_prompt() -> str:
         "When the user tells you a lasting fact about themselves and asks you to remember it, call remember_fact. "
         "When they ask what you remember, call list_memories. When they ask you to forget something, call forget_memory. "
         "After a tool returns, tell the user plainly what happened, using the tool's result. "
+        "When the user asks you to open an application, call the open_app tool. "
         "Never claim you performed an action unless a tool confirmed it. "
         "If you don't know something, say so."
     )

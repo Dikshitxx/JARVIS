@@ -10,7 +10,7 @@ from app.tools.registry import REGISTRY, get_schemas, run_tool
 log = logging.getLogger("jarvis.agent")
 
 MAX_TOOL_STEPS = 4
-DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories"}
+DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories", "open_app"}
 
 
 class Agent:

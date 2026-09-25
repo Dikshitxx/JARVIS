@@ -2,6 +2,8 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
+from app.memory import store as _memory_store
+
 log = logging.getLogger("jarvis.tools")
 
 RISK_LEVELS = ("safe", "confirm", "blocked")
@@ -64,7 +66,10 @@ def run_tool(name: str, args: dict, confirmed: bool = False) -> str:
         if tool.verify is not None:
             ok = tool.verify(args or {}, result)
             log.info("VERIFICATION: %s | TOOL: %s", "PASSED" if ok else "FAILED", name)
+        _memory_store.log_tool_execution(name, args or {}, result, confirmed, success=True)
         return result
     except Exception as e:
         log.exception("Tool %s failed", name)
-        return f"Error: tool '{name}' failed: {e}"
+        error_result = f"Error: tool '{name}' failed: {e}"
+        _memory_store.log_tool_execution(name, args or {}, error_result, confirmed, success=False)
+        return error_result

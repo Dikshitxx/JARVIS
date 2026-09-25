@@ -1,4 +1,9 @@
+import json
 import os
+import shlex
+import socket
+import subprocess
+import time
 from pathlib import Path
 
 from app.tools.registry import Tool, register
@@ -90,4 +95,200 @@ register(Tool(
     },
     func=find_project_deep,
     risk="confirm",
+))
+
+
+def inspect_project(path: str) -> str:
+    p = Path(path)
+    if not p.is_dir():
+        return f"Error: '{path}' is not a folder."
+
+    lines = [f"Project: {p}"]
+    entries = {e.name for e in p.iterdir()} if p.exists() else set()
+
+    if "package.json" in entries:
+        try:
+            data = json.loads((p / "package.json").read_text(encoding="utf-8"))
+            lines.append("Type: Node.js")
+            if "scripts" in data:
+                lines.append("Scripts: " + ", ".join(f"{k}" for k in data["scripts"].keys()))
+            deps = list(data.get("dependencies", {}).keys())
+            if deps:
+                lines.append(f"Key dependencies: {', '.join(deps[:8])}")
+        except (json.JSONDecodeError, OSError) as e:
+            lines.append(f"Type: Node.js (could not fully parse package.json: {e})")
+
+    if "requirements.txt" in entries:
+        lines.append("Type: Python (requirements.txt)")
+        try:
+            reqs = (p / "requirements.txt").read_text(encoding="utf-8").splitlines()
+            reqs = [r.strip() for r in reqs if r.strip() and not r.startswith("#")]
+            lines.append(f"Dependencies: {', '.join(reqs[:8])}")
+        except OSError:
+            pass
+
+    if "pyproject.toml" in entries:
+        lines.append("Type: Python (pyproject.toml)")
+
+    if ".env" in entries:
+        try:
+            env_keys = []
+            for line in (p / ".env").read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    env_keys.append(line.split("=", 1)[0])
+            lines.append(f".env present with keys: {', '.join(env_keys)} (values not read)")
+        except OSError:
+            lines.append(".env present (could not read key names)")
+
+    if "docker-compose.yml" in entries or "docker-compose.yaml" in entries:
+        lines.append("Has its own docker-compose.yml")
+
+    if ".git" in entries:
+        lines.append("Git repository: yes")
+
+    if len(lines) == 1:
+        return f"'{path}' does not look like a recognized project (no package.json, requirements.txt, pyproject.toml, or .git found)."
+
+    return "\n".join(lines)
+
+
+register(Tool(
+    name="inspect_project",
+    description="Inspect a project folder: detect its type (Node/Python), list its scripts/dependencies, and check for a .env file (key names only, never values) and Docker setup.",
+    parameters={
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Full path to the project folder"}},
+        "required": ["path"],
+    },
+    func=inspect_project,
+))
+
+
+_running_projects: dict[str, subprocess.Popen] = {}
+_running_ports: dict[str, int] = {}
+
+
+def _port_is_open(port: int, host: str = "127.0.0.1") -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def start_project(path: str, command: str, port: int) -> str:
+    p = Path(path)
+    if not p.is_dir():
+        return f"Error: '{path}' is not a folder."
+    key = str(p.resolve())
+
+    if key in _running_projects and _running_projects[key].poll() is None:
+        return f"'{path}' already has a tracked process running (PID {_running_projects[key].pid})."
+
+    if _port_is_open(port):
+        return f"Refused: port {port} is already in use by something else. Choose a different port or stop that process first."
+
+    try:
+        args = shlex.split(command)
+    except ValueError as e:
+        return f"Error: could not parse command '{command}': {e}"
+
+    try:
+        proc = subprocess.Popen(
+            args,
+            cwd=str(p),
+            shell=False,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    except Exception as e:
+        return f"Error: failed to start '{command}' in {path}: {e}"
+
+    _running_projects[key] = proc
+    _running_ports[key] = port
+    return f"Started '{command}' in {path} (PID {proc.pid}), expecting port {port}."
+
+
+def _verify_start_project(args: dict, result: str) -> bool:
+    if not result.startswith("Started"):
+        return False
+    port = args.get("port")
+    if port is None:
+        return False
+    for _ in range(10):
+        if _port_is_open(int(port)):
+            return True
+        time.sleep(1)
+    return False
+
+
+def stop_project(path: str) -> str:
+    key = str(Path(path).resolve())
+    proc = _running_projects.get(key)
+    if proc is None or proc.poll() is not None:
+        return f"No tracked running process for '{path}'."
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    del _running_projects[key]
+    _running_ports.pop(key, None)
+    return f"Stopped process for '{path}'."
+
+
+def _verify_stop_project(args: dict, result: str) -> bool:
+    return result.startswith("Stopped")
+
+
+def project_status(path: str) -> str:
+    key = str(Path(path).resolve())
+    proc = _running_projects.get(key)
+    if proc is None:
+        return f"'{path}' is not tracked as running."
+    alive = proc.poll() is None
+    port = _running_ports.get(key)
+    port_status = f", port {port} {'open' if port and _port_is_open(port) else 'not responding'}" if port else ""
+    return f"'{path}': process {'running' if alive else 'exited'} (PID {proc.pid}){port_status}."
+
+
+register(Tool(
+    name="start_project",
+    description="Start a project's dev server as a background process and verify it's actually listening on the given port. This needs the user's confirmation.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Full path to the project folder"},
+            "command": {"type": "string", "description": "The command to run, e.g. 'npm run dev' or 'uvicorn app.main:app'"},
+            "port": {"type": "integer", "description": "The port the server is expected to listen on"},
+        },
+        "required": ["path", "command", "port"],
+    },
+    func=start_project,
+    risk="confirm",
+    verify=_verify_start_project,
+))
+
+register(Tool(
+    name="stop_project",
+    description="Stop a previously started project's background process.",
+    parameters={
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Full path to the project folder"}},
+        "required": ["path"],
+    },
+    func=stop_project,
+    risk="confirm",
+    verify=_verify_stop_project,
+))
+
+register(Tool(
+    name="project_status",
+    description="Check whether a project's dev server is currently tracked as running, and whether its port is responding.",
+    parameters={
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Full path to the project folder"}},
+        "required": ["path"],
+    },
+    func=project_status,
 ))

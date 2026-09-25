@@ -3,5 +3,6 @@ uvicorn
 ollama
 python-dotenv
 pydantic
+pydantic-settings
 psutil
 pillow

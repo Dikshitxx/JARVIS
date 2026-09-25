@@ -4,6 +4,8 @@ from typing import Callable
 
 log = logging.getLogger("jarvis.tools")
 
+RISK_LEVELS = ("safe", "confirm", "blocked")
+
 
 @dataclass
 class Tool:
@@ -13,6 +15,7 @@ class Tool:
     func: Callable
     risk: str = "safe"  # "safe" | "confirm" | "blocked"
     needs_confirm: Callable | None = None
+    verify: Callable | None = None
 
 
 REGISTRY: dict[str, Tool] = {}
@@ -56,7 +59,12 @@ def run_tool(name: str, args: dict, confirmed: bool = False) -> str:
         raise NeedsConfirmation(name, args or {})
     try:
         log.info("Running tool %s with %s (confirmed=%s)", name, args, confirmed)
-        return str(tool.func(**(args or {})))
+        log.info("PERMISSION: %s | TOOL: %s", "CONFIRMED" if confirmed else tool.risk.upper(), name)
+        result = str(tool.func(**(args or {})))
+        if tool.verify is not None:
+            ok = tool.verify(args or {}, result)
+            log.info("VERIFICATION: %s | TOOL: %s", "PASSED" if ok else "FAILED", name)
+        return result
     except Exception as e:
         log.exception("Tool %s failed", name)
         return f"Error: tool '{name}' failed: {e}"

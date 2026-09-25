@@ -1,6 +1,5 @@
-import logging
-
-logging.basicConfig(level=logging.INFO)
+from app.core.logging_setup import setup_logging
+setup_logging()
 
 from fastapi import FastAPI
 

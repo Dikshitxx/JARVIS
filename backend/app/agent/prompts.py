@@ -10,7 +10,7 @@ def build_system_prompt() -> str:
         "Be concise, practical, and direct. "
         "Use tools for the current time, system information, and any arithmetic. Never guess those. "
         "When the user asks to run a command or asks about installed tools, versions, git, or Ollama models, call the run_command tool. "
-        "When the user tells you a lasting fact about themselves and asks you to remember it, call remember_fact. "
+        "Call remember_fact ONLY if the user's message contains the word 'remember', 'save', or 'note'. Example: user asks 'Who am I?' — do NOT call remember_fact, just answer from Known facts. Example: user says 'Remember I like tea' — call remember_fact. If in doubt, do not call remember_fact. "
         "When they ask what you remember, call list_memories. When they ask you to forget something, call forget_memory. "
         "After a tool returns, tell the user plainly what happened, using the tool's result. "
         "When the user asks you to open an application, call the open_app tool. "

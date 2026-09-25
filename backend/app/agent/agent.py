@@ -13,6 +13,7 @@ MAX_TOOL_STEPS = 4
 DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories", "open_app", "close_app", "take_screenshot"}
 YES = {"yes", "y", "yeah", "yep", "confirm", "confirmed", "do it", "go ahead"}
 NO = {"no", "n", "nope", "cancel", "stop", "dont", "don't"}
+REMEMBER_TRIGGERS = {"remember", "save", "note", "don't forget", "dont forget"}
 
 
 class Agent:
@@ -30,7 +31,7 @@ class Agent:
         name, args = self.pending
         self.pending = None  # any message resolves or drops the pending action
         if answer in YES:
-            print(f"[agent] CONFIRMED {name} {args}", flush=True)
+            log.info("CONFIRMED %s %s", name, args)
             return run_tool(name, args, confirmed=True)
         if answer in NO:
             return "Cancelled. Nothing was done."
@@ -50,6 +51,7 @@ class Agent:
                 return outcome
 
         self.history.append({"role": "user", "content": user_text})
+        allow_remember = any(t in user_text.lower() for t in REMEMBER_TRIGGERS)
         self.history = self.history[-config.MAX_HISTORY_MESSAGES:]
 
         messages = [{"role": "system", "content": build_system_prompt()}] + self.history
@@ -63,11 +65,11 @@ class Agent:
                     msg = client.chat(messages, tools=get_schemas())
                     break
                 except Exception as e:
-                    print(f"[agent] model error (attempt {attempt + 1}): {e}", flush=True)
+                    log.warning("model error (attempt %s): %s", attempt + 1, e)
             if msg is None:
                 reply = "Sorry boss, I could not process that. Try rephrasing, or give me one fact at a time."
                 break
-            print(f"[agent] tool_calls={msg.tool_calls} content={msg.content!r}", flush=True)
+            log.info("tool_calls=%s content=%r", msg.tool_calls, msg.content)
 
             calls = []
             if msg.tool_calls:
@@ -87,6 +89,12 @@ class Agent:
             messages.append({"role": "assistant", "content": msg.content or ""})
             results = []
             for name, args in calls:
+                if name == "remember_fact" and not allow_remember:
+                    result = "Skipped: remember_fact was not called because the user did not ask to remember, save, or note anything."
+                    log.info("BLOCKED remember_fact: no trigger word in user message %r", user_text)
+                    messages.append({"role": "tool", "content": result, "tool_name": name})
+                    results.append((name, result))
+                    continue
                 try:
                     result = run_tool(name, args)
                 except NeedsConfirmation as need:
@@ -94,7 +102,7 @@ class Agent:
                     reply = f"Confirm: {need.tool_name} {need.tool_args}? Reply 'yes' or 'no'."
                     finished = True
                     break
-                print(f"[agent] ran {name} {args} -> {result[:200]!r}", flush=True)
+                log.info("ran %s %s -> %r", name, args, result[:200])
                 messages.append({"role": "tool", "content": result, "tool_name": name})
                 results.append((name, result))
 

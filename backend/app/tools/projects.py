@@ -177,6 +177,30 @@ def _port_is_open(port: int, host: str = "127.0.0.1") -> bool:
         return False
 
 
+def _try_launch(p: Path, args: list[str], port: int) -> tuple[subprocess.Popen | None, str | None]:
+    try:
+        proc = subprocess.Popen(
+            args,
+            cwd=str(p),
+            shell=False,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    except Exception as e:
+        return None, f"failed to start '{' '.join(args)}' in {p}: {e}"
+    return proc, None
+
+
+def _wait_for_port_or_death(proc: subprocess.Popen, port: int, timeout_s: int = 10) -> str:
+    """Returns 'up', 'died', or 'timeout'."""
+    for _ in range(timeout_s):
+        if proc.poll() is not None:
+            return "died"
+        if _port_is_open(port):
+            return "up"
+        time.sleep(1)
+    return "timeout"
+
+
 def start_project(path: str, command: str, port: int) -> str:
     p = Path(path)
     if not p.is_dir():
@@ -194,32 +218,56 @@ def start_project(path: str, command: str, port: int) -> str:
     except ValueError as e:
         return f"Error: could not parse command '{command}': {e}"
 
-    try:
-        proc = subprocess.Popen(
-            args,
-            cwd=str(p),
-            shell=False,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
-    except Exception as e:
-        return f"Error: failed to start '{command}' in {path}: {e}"
+    attempt = 1
+    max_attempts = 2
+    last_reason = None
 
-    _running_projects[key] = proc
-    _running_ports[key] = port
-    return f"Started '{command}' in {path} (PID {proc.pid}), expecting port {port}."
+    while attempt <= max_attempts:
+        proc, launch_err = _try_launch(p, args, port)
+        if proc is None:
+            last_reason = launch_err
+            attempt += 1
+            continue
+
+        outcome = _wait_for_port_or_death(proc, port)
+
+        if outcome == "up":
+            _running_projects[key] = proc
+            _running_ports[key] = port
+            suffix = f" (recovered after {attempt} attempts)" if attempt > 1 else ""
+            return f"Started '{command}' in {path} (PID {proc.pid}), port {port} confirmed open{suffix}."
+
+        if outcome == "died":
+            exit_code = proc.poll()
+            last_reason = f"process exited immediately (exit code {exit_code}) on attempt {attempt}"
+            attempt += 1
+            continue
+
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return (
+            f"Failed: '{command}' in {path} started (PID was {proc.pid}) but port {port} "
+            f"never opened within 10s. Not retrying (process was alive, so retrying the same "
+            f"command won't help) — check the command/port are correct."
+        )
+
+    return f"Failed: '{command}' in {path} could not be started after {max_attempts} attempts. Last reason: {last_reason}"
 
 
 def _verify_start_project(args: dict, result: str) -> bool:
+    # start_project() now verifies internally before returning. This just re-confirms
+    # the final state matches what was reported, for consistency with the registry's
+    # verify() hook contract.
     if not result.startswith("Started"):
         return False
     port = args.get("port")
-    if port is None:
-        return False
-    for _ in range(10):
-        if _port_is_open(int(port)):
-            return True
-        time.sleep(1)
-    return False
+    return port is not None and _port_is_open(int(port))
 
 
 def stop_project(path: str) -> str:

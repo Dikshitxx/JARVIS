@@ -6,3 +6,5 @@ pydantic
 pydantic-settings
 psutil
 pillow
+pyautogui
+pywinauto

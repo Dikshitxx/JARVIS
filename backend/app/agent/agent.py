@@ -10,7 +10,7 @@ from app.tools.registry import REGISTRY, NeedsConfirmation, get_schemas, run_too
 log = logging.getLogger("jarvis.agent")
 
 MAX_TOOL_STEPS = 4
-DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories", "open_app", "close_app", "take_screenshot"}
+DIRECT_REPLY_TOOLS = {"remember_fact", "forget_memory", "list_memories", "open_app", "close_app", "take_screenshot", "remember_person", "list_known_people", "move_mouse", "click_mouse", "type_text", "press_key"}
 YES = {"yes", "y", "yeah", "yep", "confirm", "confirmed", "do it", "go ahead"}
 NO = {"no", "n", "nope", "cancel", "stop", "dont", "don't"}
 REMEMBER_TRIGGERS = {"remember", "save", "note", "don't forget", "dont forget"}

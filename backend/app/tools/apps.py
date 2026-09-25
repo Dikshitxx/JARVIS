@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import psutil
@@ -102,6 +103,7 @@ def open_app(name: str) -> str:
             )
         except Exception as e:
             return f"Error: failed to launch {key}: {e}"
+        time.sleep(1.0)  # give the window time to open and receive focus
         return f"Launched {key}."
 
     if _is_blocked(key):
@@ -114,6 +116,7 @@ def open_app(name: str) -> str:
             os.startfile(str(shortcut))
         except Exception as e:
             return f"Error: failed to launch {shortcut.stem}: {e}"
+        time.sleep(1.0)  # give the window time to open and receive focus
         return f"Launched {shortcut.stem}."
 
     store_app = _find_store_app(key)
@@ -125,6 +128,7 @@ def open_app(name: str) -> str:
         subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{store_app['AppID']}"], shell=False)
     except Exception as e:
         return f"Error: failed to launch {store_app['Name']}: {e}"
+    time.sleep(1.0)  # give the window time to open and receive focus
     return f"Launched {store_app['Name']}."
 
 

@@ -16,6 +16,8 @@ def build_system_prompt() -> str:
         "When the user asks you to open an application, call the open_app tool. "
         "When the user asks you to close an application, call the close_app tool. "
         "When the user asks for a screenshot, call the take_screenshot tool. "
+        "When the user asks you to move the mouse, click, type text, or press a key, call the matching tool (move_mouse, click_mouse, type_text, press_key). Always describe exactly what you are about to do before the user confirms. "
+        "When calling type_text, always include target_window with the name of the app the text should go into (e.g. 'Notepad'), so it doesn't get typed into the wrong window. "
         "Never claim you performed an action unless a tool confirmed it. "
         "If you don't know something, say so."
     )

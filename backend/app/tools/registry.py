@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.memory import store as _memory_store
+from app.recovery import attempt_recovery, MAX_RECOVERY_ATTEMPTS
 
 log = logging.getLogger("jarvis.tools")
 
@@ -70,6 +71,10 @@ def run_tool(name: str, args: dict, confirmed: bool = False) -> str:
         if tool.verify is not None:
             ok = tool.verify(args or {}, result)
             log.info("VERIFICATION: %s | TOOL: %s", "PASSED" if ok else "FAILED", name)
+            if not ok:
+                result, recovered = attempt_recovery(tool, args or {}, result)
+                if not recovered:
+                    result = f"{result}\n(Tried {MAX_RECOVERY_ATTEMPTS} times, still not verified. Giving up — please check manually.)"
         _memory_store.log_tool_execution(name, args or {}, result, confirmed, success=True)
         return result
     except Exception as e:

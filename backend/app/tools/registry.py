@@ -50,18 +50,22 @@ class NeedsConfirmation(Exception):
 
 
 def run_tool(name: str, args: dict, confirmed: bool = False) -> str:
+    from app.permissions.classify import classify
+
     tool = REGISTRY.get(name)
+    decision, reason = classify(name, args or {})
+    log.info("CLASSIFY: %s | TOOL: %s | REASON: %s", decision, name, reason)
     if tool is None:
         log.warning("Model asked for unknown tool: %s", name)
         return f"Error: tool '{name}' does not exist."
-    if tool.risk == "blocked":
-        return f"Error: tool '{name}' is disabled."
-    must_confirm = tool.risk == "confirm" or (tool.needs_confirm is not None and tool.needs_confirm(args or {}))
-    if must_confirm and not confirmed:
+    if decision == "BLOCK":
+        return f"Refused: {name} is not permitted ({reason})."
+    if decision == "CONFIRM" and not confirmed:
         raise NeedsConfirmation(name, args or {})
     try:
         log.info("Running tool %s with %s (confirmed=%s)", name, args, confirmed)
-        log.info("PERMISSION: %s | TOOL: %s", "CONFIRMED" if confirmed else tool.risk.upper(), name)
+        if confirmed:
+            log.info("PERMISSION: CONFIRMED | TOOL: %s", name)
         result = str(tool.func(**(args or {})))
         if tool.verify is not None:
             ok = tool.verify(args or {}, result)

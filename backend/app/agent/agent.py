@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 
 from app import tools  # noqa: F401  (loads and registers tools)
 from app.agent.prompts import build_system_prompt
@@ -19,7 +20,7 @@ REMEMBER_TRIGGERS = {"remember", "save", "note", "don't forget", "dont forget"}
 class Agent:
     def __init__(self):
         self.history: list[dict] = []
-        self.pending: tuple[str, dict] | None = None  # action waiting for the user's yes/no
+        self.pending: tuple[str, dict, float] | None = None  # action waiting for the user's yes/no
 
     def _remember_turn(self, user_text: str, reply: str) -> None:
         self.history.append({"role": "user", "content": user_text})
@@ -28,8 +29,10 @@ class Agent:
 
     def _handle_pending(self, user_text: str) -> str | None:
         answer = user_text.strip().lower().strip(" .!")
-        name, args = self.pending
+        name, args, created_at = self.pending
         self.pending = None  # any message resolves or drops the pending action
+        if time.time() - created_at > 300:
+            return "That confirmation request expired. Please ask again."
         if answer in YES:
             log.info("CONFIRMED %s %s", name, args)
             return run_tool(name, args, confirmed=True)
@@ -98,7 +101,7 @@ class Agent:
                 try:
                     result = run_tool(name, args)
                 except NeedsConfirmation as need:
-                    self.pending = (need.tool_name, need.tool_args)
+                    self.pending = (need.tool_name, need.tool_args, time.time())
                     reply = f"Confirm: {need.tool_name} {need.tool_args}? Reply 'yes' or 'no'."
                     finished = True
                     break

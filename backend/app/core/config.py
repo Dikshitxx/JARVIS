@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     OWNER_NAME: str = "Boss"
 
     MAX_HISTORY_MESSAGES: int = 10
-    NUM_CTX: int = 2048
+    NUM_CTX: int = 4096
     MAX_MEMORIES_IN_PROMPT: int = 30
 
 

@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --background: #090d0f;
+  --foreground: #e7f0ed;
+  --surface: #101719;
+  --line: #263638;
+  --cyan: #61e5d2;
+  --muted: #819391;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  color: var(--foreground);
+  background-color: var(--background);
+  background-image:
+    linear-gradient(rgba(106, 151, 146, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(106, 151, 146, 0.035) 1px, transparent 1px),
+    radial-gradient(ellipse at 52% 0%, rgba(38, 86, 79, 0.19), transparent 52%);
+  background-size: 42px 42px, 42px 42px, auto;
+  font-family: var(--font-geist-sans), sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+::selection {
+  color: #07100f;
+  background: var(--cyan);
+}

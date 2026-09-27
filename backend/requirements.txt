@@ -8,3 +8,5 @@ psutil
 pillow
 pyautogui
 pywinauto
+playwright
+pyperclip

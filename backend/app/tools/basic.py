@@ -1,6 +1,9 @@
 import ast
 import operator
 from datetime import datetime
+import json
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import psutil
 
@@ -44,6 +47,34 @@ def calculate(expression: str) -> str:
     return str(result)
 
 
+def get_weather(location: str = "") -> str:
+    if not location.strip():
+        return "I need a city or location to check the current weather."
+    try:
+        query = urlencode({"name": location, "count": 1, "language": "en", "format": "json"})
+        with urlopen(f"https://geocoding-api.open-meteo.com/v1/search?{query}", timeout=10) as response:
+            places = json.load(response).get("results") or []
+        if not places:
+            return f"I couldn't find a weather location matching '{location}'."
+        place = places[0]
+        query = urlencode({
+            "latitude": place["latitude"],
+            "longitude": place["longitude"],
+            "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
+            "timezone": "auto",
+        })
+        with urlopen(f"https://api.open-meteo.com/v1/forecast?{query}", timeout=10) as response:
+            current = json.load(response).get("current") or {}
+        return (
+            f"Current weather in {place['name']}: {current.get('temperature_2m')}°C, "
+            f"feels like {current.get('apparent_temperature')}°C, "
+            f"humidity {current.get('relative_humidity_2m')}%, "
+            f"wind {current.get('wind_speed_10m')} km/h."
+        )
+    except Exception as exc:
+        return f"Weather service failed for '{location}': {exc}"
+
+
 register(Tool(
     name="get_time",
     description="Get the current local date and time. Use this whenever the user asks about the time or date.",
@@ -69,4 +100,15 @@ register(Tool(
         "required": ["expression"],
     },
     func=calculate,
+))
+
+register(Tool(
+    name="get_weather",
+    description="Get current weather for a city or location. Use this for current weather questions, not web search.",
+    parameters={
+        "type": "object",
+        "properties": {"location": {"type": "string", "description": "City or location to check"}},
+        "required": ["location"],
+    },
+    func=get_weather,
 ))

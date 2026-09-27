@@ -1,5 +1,1 @@
-from app.core.logging_setup import setup_logging
-
-setup_logging()
-
-from app.tools import basic, files, terminal, memory_tools, apps, screen, people_tools, desktop_input, projects  # noqa: F401
+from app.tools import basic, files, terminal, memory_tools, apps, screen, people_tools, desktop_input, projects, browser, clipboard, whatsapp  # noqa: F401

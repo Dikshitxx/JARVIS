@@ -55,8 +55,7 @@ def _find_shortcut(query: str) -> Path | None:
 
 
 def _needs_confirm(args: dict) -> bool:
-    name = str(args.get("name", "")).strip().lower()
-    return name not in config.ALLOWED_APPS and not _is_blocked(name)
+    return False  # opening any app is treated as safe, per explicit user decision
 
 
 def _list_start_apps() -> list[dict]:

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import re
 from urllib.parse import quote_plus
 from urllib.parse import urlparse
 
@@ -30,7 +31,44 @@ class BrowserTargetAdapter(ABC):
         raise NotImplementedError
 
     def search(self, query: str) -> ToolResult:
-        return ToolResult("invalid_action", f"Search is unsupported for {self.target.name}.")
+        if "interact" in self.target.capabilities:
+            return self.interact(query)
+        if "search" in self.target.capabilities and self.target.search_url:
+            url = self.target.search_url.format(query=quote_plus(query))
+            return self._navigate_and_verify(url, "search")
+
+        # New URL targets need no registered site entry: try the page's
+        # standard search controls before reporting that the capability is absent.
+        page = self.session.page(self.target.name, self.target.canonical_url)
+        challenge = check_challenge(page)
+        if challenge:
+            return challenge
+        start_url = page.url
+        selectors = (
+            "input[type='search']", "[role='searchbox']",
+            "input[placeholder*='search' i]", "input[aria-label*='search' i]",
+        )
+        for selector in selectors:
+            try:
+                field = page.locator(selector).first
+                field.wait_for(state="visible", timeout=min(config.BROWSER_INTERACTION_TIMEOUT, 2500))
+                field.fill(query)
+                field.press("Enter")
+                page.wait_for_timeout(500)
+                if page.url != start_url:
+                    return ToolResult("success", f"Searched {self.target.name} for: {query}")
+            except Exception:
+                continue
+        return ToolResult("invalid_action", f"I opened {self.target.name}, but it has no usable search control that I can verify.")
+
+    def _navigate_and_verify(self, url: str, operation: str) -> ToolResult:
+        page = self.session.page(self.target.name, url)
+        challenge = check_challenge(page)
+        if challenge:
+            return challenge
+        if page.url == "about:blank":
+            return ToolResult("failure", f"Could not verify {operation} on {self.target.name}.")
+        return ToolResult("success", f"Searched {self.target.name}.", verification_status="verified")
 
     def interact(self, query: str) -> ToolResult:
         return ToolResult("invalid_action", f"Interaction is unsupported for {self.target.name}.")
@@ -47,7 +85,7 @@ class GenericTargetAdapter(BrowserTargetAdapter):
             return challenge
         if not page.url.startswith(self.target.canonical_url):
             return ToolResult("failure", f"Could not verify navigation to {self.target.name}.")
-        return ToolResult("success", f"Opened {self.target.name}.")
+        return ToolResult("success", f"Opened {self.target.name}.", verification_status="verified")
 
     def search(self, query: str) -> ToolResult:
         if "search" not in self.target.capabilities or not self.target.search_url:
@@ -61,7 +99,7 @@ class GenericTargetAdapter(BrowserTargetAdapter):
         actual_host = urlparse(page.url).netloc.removeprefix("www.")
         if page.url == "about:blank" or not (actual_host == expected_host or actual_host.endswith(f".{expected_host}")):
             return ToolResult("failure", f"Could not verify search navigation on {self.target.name}.")
-        return ToolResult("success", f"Searched {self.target.name} for: {query}")
+        return ToolResult("success", f"Searched {self.target.name} for: {query}", verification_status="verified")
 
     def interact(self, query: str) -> ToolResult:
         if "interact" not in self.target.capabilities:
@@ -87,28 +125,84 @@ class YouTubeAdapter(GenericTargetAdapter):
         result = super().search(query)
         return result
 
-    def play(self, query: str) -> ToolResult:
+    def play(self, query: str, avoid_current: bool = False, result_index: int = 0) -> ToolResult:
         page = self.session.page(self.target.name)
+        previous_url = page.url
+        current_page = self.session.get_page("youtube_playback")
+        current_url = current_page.url if current_page is not None and not current_page.is_closed() else previous_url
+        current_video = re.search(r"[?&]v=([^&]+)", current_url)
         page.goto(self.target.search_url.format(query=quote_plus(query)), timeout=config.BROWSER_NAVIGATION_TIMEOUT)
         try:
-            result = page.locator("ytd-video-renderer a#video-title").first
-            result.wait_for(state="visible", timeout=config.BROWSER_INTERACTION_TIMEOUT)
+            results = page.locator("ytd-video-renderer a#video-title")
+            results.first.wait_for(state="visible", timeout=config.BROWSER_INTERACTION_TIMEOUT)
+            count = min(results.count(), 12)
+            result = results.nth(min(max(result_index, 0), count - 1))
+            if avoid_current:
+                for index in range(min(result_index, count - 1), count):
+                    candidate = results.nth(index)
+                    href = candidate.get_attribute("href") or ""
+                    candidate_video = re.search(r"[?&]v=([^&]+)", href)
+                    if href and (not current_video or not candidate_video or candidate_video.group(1) != current_video.group(1)):
+                        result = candidate
+                        break
+            title = (result.get_attribute("title") or result.inner_text()).strip()
             result.click()
             page.wait_for_selector("video", state="attached", timeout=config.BROWSER_INTERACTION_TIMEOUT)
         except Exception as exc:
             return ToolResult("failure", f"Could not select a YouTube result: {exc}")
         self.session.set_page("youtube_playback", page)
-        return ToolResult("success", f"Playing YouTube result for: {query}")
+        playing = "() => { const video = document.querySelector('video'); return video && !video.paused && video.currentTime > 0; }"
+        try:
+            page.wait_for_function(playing, timeout=min(config.BROWSER_INTERACTION_TIMEOUT, 4000))
+        except Exception:
+            # YouTube occasionally leaves the selected result paused after
+            # navigation. Request playback once and verify the actual element
+            # state before reporting success.
+            try:
+                page.locator("video").first.evaluate(
+                    "video => video.paused ? video.play().then(() => true).catch(() => false) : true"
+                )
+                page.wait_for_function(playing, timeout=min(config.BROWSER_INTERACTION_TIMEOUT, 8000))
+            except Exception:
+                return ToolResult(
+                    "failure",
+                    f"Opened {title or query} on YouTube, but playback did not start after one retry.",
+                    data={"media_title": title or query, "url": page.url},
+                    verification_status="failed",
+                )
+        return ToolResult("success", f"Playing {title or query} on YouTube.", data={"media_title": title or query, "url": page.url}, verification_status="verified")
 
     def toggle_playback(self) -> ToolResult:
         page = self.session.get_page("youtube_playback")
         if page is None or page.is_closed():
             return ToolResult("failure", "No YouTube video is currently tracked.")
         try:
-            page.keyboard.press("k")
-            return ToolResult("success", "Toggled play/pause on the current YouTube video.")
+            paused = bool(page.locator("video").first.evaluate("video => video.paused"))
+            return self.set_playback("resume" if paused else "pause")
         except Exception as exc:
             return ToolResult("failure", f"Could not control YouTube playback: {exc}")
+
+    def set_playback(self, action: str) -> ToolResult:
+        page = self.session.get_page("youtube_playback")
+        if page is None or page.is_closed():
+            return ToolResult("failure", "No YouTube video is currently tracked.")
+        try:
+            video = page.locator("video").first
+            paused = bool(video.evaluate("video => video.paused"))
+            should_pause = action == "pause"
+            if paused == should_pause:
+                state = "paused" if paused else "playing"
+                return ToolResult("success", f"The current YouTube video is already {state}.", verification_status="verified")
+            page.keyboard.press("k")
+            page.wait_for_function(
+                "(shouldPause) => { const video = document.querySelector('video'); return video && video.paused === shouldPause; }",
+                arg=should_pause,
+                timeout=config.BROWSER_INTERACTION_TIMEOUT,
+            )
+            state = "paused" if should_pause else "playing"
+            return ToolResult("success", f"YouTube playback is {state}.", verification_status="verified")
+        except Exception as exc:
+            return ToolResult("failure", f"Could not verify YouTube {action}: {exc}")
 
 
 class ChatAdapter(GenericTargetAdapter):
@@ -122,13 +216,16 @@ class ChatAdapter(GenericTargetAdapter):
             return ToolResult("authentication_required", f"{self.target.name} requires login before interaction.")
         if not page.locator("textarea, input[type='text']").count():
             return ToolResult("failure", f"{self.target.name} did not expose a usable conversation input.")
-        return ToolResult("success", f"Opened {self.target.name}.")
+        return ToolResult("success", f"Opened {self.target.name}.", verification_status="verified")
 
     def interact(self, query: str) -> ToolResult:
         ready = self.open()
         if ready.status != "success":
             return ready
         return super().interact(query)
+
+    def search(self, query: str) -> ToolResult:
+        return self.interact(query)
 
 
 def adapter_for(session, target: BrowserTarget) -> BrowserTargetAdapter:

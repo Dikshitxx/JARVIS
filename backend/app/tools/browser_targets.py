@@ -21,6 +21,7 @@ TARGETS = {
     "wikipedia": BrowserTarget("wikipedia", "https://www.wikipedia.org", "https://www.wikipedia.org/w/index.php?search={query}", frozenset({"open", "search"})),
     "github": BrowserTarget("github", "https://github.com", "https://github.com/search?q={query}", frozenset({"open", "search"})),
     "amazon": BrowserTarget("amazon", "https://www.amazon.com", "https://www.amazon.com/s?k={query}", frozenset({"open", "search"})),
+    "whatsapp": BrowserTarget("whatsapp", "https://web.whatsapp.com", capabilities=frozenset({"open", "interact"}), adapter="chat"),
     "chatgpt": BrowserTarget("chatgpt", "https://chatgpt.com", capabilities=frozenset({"open", "interact"}), adapter="chat"),
     "claude": BrowserTarget("claude", "https://claude.ai", capabilities=frozenset({"open", "interact"}), adapter="chat"),
     "grok": BrowserTarget("grok", "https://grok.com", capabilities=frozenset({"open", "interact"}), adapter="chat"),
@@ -32,12 +33,29 @@ ALIASES = {
     "you tube": "youtube",
     "chat gpt": "chatgpt",
     "chat-gpt": "chatgpt",
+    "whatsappweb": "whatsapp",
+    "whatsapp web": "whatsapp",
+    "wa": "whatsapp",
 }
 
 
 def normalize_target(value: str) -> str:
     target = value.strip().strip(".!?,").lower()
-    return ALIASES.get(target, target.replace(" ", ""))
+    target = re.sub(r"[-_]+", " ", target)
+    if target in ALIASES:
+        return ALIASES[target]
+    if target in TARGETS:
+        return target
+
+    noise_removed = re.sub(r"\b(?:web|browser|messenger|application|app|desktop)\b", " ", target).strip()
+    for candidate in (noise_removed, re.sub(r"\s+", "", target), re.sub(r"\s+", "", noise_removed)):
+        if candidate in TARGETS:
+            return candidate
+        if candidate in ALIASES:
+            return ALIASES[candidate]
+
+    collapsed = re.sub(r"\s+", "", target)
+    return ALIASES.get(target, ALIASES.get(noise_removed, collapsed))
 
 
 def resolve_target(value: str) -> BrowserTarget | None:
@@ -58,6 +76,14 @@ def browser_search_url(target: BrowserTarget, query: str) -> str | None:
 
 def parse_browser_intent(user_text: str) -> dict | None:
     text = user_text.strip().rstrip(".!?")
+    # General web search is not a site-targeted browser operation.
+    if re.match(r"^(?:search|look up|find)\s+(?:the\s+web|online|the\s+internet)\s+for\s+", text, re.I):
+        return None
+    match = re.match(r"^(?:search|find|look up)\s+(?:on\s+)?(.+?)\s+for\s+(.+)$", text, re.I)
+    if match:
+        target_name, query = match.group(1).strip(), match.group(2).strip()
+        if target_name.lower() not in {"the web", "online", "the internet", "google"}:
+            return {"intent": "browser_search", "target": normalize_target(target_name), "query": query, "operation": "search"}
     match = re.match(r"^(?:search|find|look up)\s+(.+?)\s+on\s+(.+)$", text, re.I)
     if match:
         return {"intent": "browser_search", "target": normalize_target(match.group(2)), "query": match.group(1).strip(), "operation": "search"}
@@ -68,6 +94,14 @@ def parse_browser_intent(user_text: str) -> dict | None:
     if match:
         return {"intent": "browser_search", "target": normalize_target(match.group(1)), "query": match.group(2).strip(), "operation": "navigate_search"}
     match = re.match(r"^open\s+(.+)$", text, re.I)
-    if match and resolve_target(match.group(1)) is not None:
-        return {"intent": "browser_open", "target": normalize_target(match.group(1)), "query": "", "operation": "open"}
+    if match:
+        target_name = match.group(1).strip()
+        from app.tools.apps import resolve_application_name
+
+        app_name = resolve_application_name(target_name)
+        # "WhatsApp Messenger" explicitly names the web target; "WhatsApp"
+        # alone can still resolve to the installed desktop application.
+        explicit_web_target = "messenger" in target_name.lower() or "web" in target_name.lower()
+        if resolve_target(target_name) is not None and (app_name is None or explicit_web_target):
+            return {"intent": "browser_open", "target": normalize_target(target_name), "query": "", "operation": "open"}
     return None

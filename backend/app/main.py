@@ -9,12 +9,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.core.config import settings
 from app.tools.browser_session import shutdown_browser_session
+from app.tasks import task_manager
+from app.voice import voice_service
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-	yield
-	shutdown_browser_session()
+    voice_service.start()
+    try:
+        yield
+    finally:
+        voice_service.stop()
+        task_manager.cancel_all()
+        shutdown_browser_session()
 
 app = FastAPI(title="Jarvis Agent Core", lifespan=lifespan)
 app.add_middleware(

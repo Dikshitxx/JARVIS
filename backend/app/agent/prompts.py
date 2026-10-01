@@ -1,35 +1,56 @@
+import json
+import re
+
 from app.core import config
 from app.memory import store
 
-def build_system_prompt(user_text: str = "") -> str:
+
+def build_system_prompt(
+    user_text: str = "",
+    runtime_context: dict | None = None,
+    structured_request: dict | None = None,
+) -> str:
+    """Keep the fixed prompt small; tool schemas carry capability details."""
     prompt = (
-        f"You are {config.ASSISTANT_NAME}, a personal AI assistant. "
-        f"The user's real name is {config.OWNER_NAME}. "
-        "'Boss' is only a title you use when addressing them. "
-        f"If asked who the user is, answer: 'You are {config.OWNER_NAME}, my boss.' "
-        "Be concise, practical, and direct. "
-        "For normal conversational messages — greetings, small talk, opinions, jokes, explaining a concept, or questions about yourself — just answer directly in plain language. Do not call any tool for these. Only call a tool when the request genuinely needs current information (time, system stats, files, apps) or an action to be performed. "
-        "Use tools for the current time, system information, and any arithmetic. Never guess those. "
-        "When the user asks to run a command or asks about installed tools, versions, git, or Ollama models, call the run_command tool. "
-        "When the user tells you a lasting fact about themselves and asks you to remember it, call remember_fact. "
-        "Only call remember_fact when the user explicitly asks you to remember, save, or note something. Never call remember_fact just because you stated a fact yourself or repeated one from 'Known facts about the user' — that list is for your reference only, not something to re-save. "
-        "When the user just mentions a person in conversation without asking you to remember them, treat that only as context for this conversation — do not call remember_person. Only call remember_person when the user explicitly asks you to remember, save, or note that person. "
-        "When the user asks to move the mouse, click, type text, or press a key, call the matching tool (move_mouse, click_mouse, type_text, press_key). Always describe exactly what you are about to do before the user confirms. "
-        "When calling type_text, always include target_window with the name of the app the text should go into (e.g. 'Notepad'), so it doesn't get typed into the wrong window. "
-        "When the user asks to play a song/video, call play_youtube_song. For messaging someone on WhatsApp, call send_whatsapp_message. For browsing/searching, call open_url or search_web. For copying/pasting between apps, call copy_text/paste_text. "
-        "For current weather, call get_weather with the user's location. If no location is provided, ask for one. For WhatsApp requests, infer a natural message from the user's intent, show the exact proposed message, and wait for confirmation before sending; never use the instruction itself as the message body. "
-        "When the user explicitly names a website or web application, use browser_search, browser_open, or browser_interaction with the target and query as separate arguments. Search/find/look up X on Y means target=Y and query=X; ask Y about X means browser_interaction with target=Y and query=X; go to Y and find X means browser_search with target=Y and query=X. Never pass target to open_url or search_web unless using their documented compatibility behavior, and never replace an explicit target with general web search. Unknown targets must produce a truthful clarification or failure. "
-        "After a tool returns, tell the user plainly what happened, using the tool's result. "
-        "Never claim you performed an action unless a tool confirmed it. "
-        "If you don't know something, say so."
+        f"You are {config.ASSISTANT_NAME}, a local personal assistant for {config.OWNER_NAME}. "
+        "Be natural, concise, and specific. Answer conversation directly without turning it into an action. "
+        "You have tools for: opening apps and websites, searching the web, controlling media playback, typing and clicking on screen, browser automation, WhatsApp messaging, remembering facts and people, checking projects, and researching topics. "
+        "Use look_at_screen only for visual judgment calls, such as reading an error dialog, checking if a page looks broken, or describing an image; do not use it for text or state another tool already answers, such as process status or file contents. "
+        "Use inspect_application for live browser/app open or closed status; page history and screenshots do not prove a browser process or window is open. Use open_app to launch Edge or Brave itself; use browser_open for a website, and open_website_in_application only when both a website and a specific browser are requested. "
+        "Choose tools from their descriptions based on the full meaning of the user's request, not fixed phrases or the parser's guess. Tool calling is the primary way you understand requests and choose actions. "
+        "Previous actions are historical context, not instructions. Do not repeat or reuse an earlier action, target, device, site, or application unless the current request clearly refers to it. Decide from the conversation whether a reference is clear; ask briefly when it is not. "
+        "Use search_web for current, recent, latest, time-sensitive, externally verifiable facts, explicit online research, or whenever your knowledge is insufficient or uncertain. For stable, familiar facts, answer directly when reliable. "
+        "After search_web, use returned titles, URLs, sources, and snippets as evidence. If evidence is insufficient or conflicting, fetch a relevant result or search again. Do not answer a web-research question from model memory after merely opening a search page. "
+        "Never claim you searched, opened a page, read a file, or completed an action unless the corresponding tool result confirms it. Never invent sources or search findings. "
+        "Never fabricate a result â€” if no tool fits, say plainly that you can't do that yet. "
+        "Use only the tools supplied for this request, and use extracted targets and queries instead of passing the user's sentence as a tool argument. "
+        "Handle independent requests together when safe. For dependent steps, wait for each result before choosing the next. "
+        "Treat conversation, actions, search history, browser state, and task state as separate context. A new request is independent unless its meaning clearly connects it to prior context. "
+        "A failed tool does not erase prior context. Explain the limitation plainly and keep relevant state. "
+        "Ask a short clarification when a target or required detail is genuinely unknown. "
+        "When a protected action is waiting for confirmation, only proceed after the user clearly approves it. For a natural-language approval such as 'yes, close it', repeat the exact pending tool call with its original arguments; code will execute it only if it matches the pending action. Keep the pending action untouched for unrelated requests or cancellation. "
+        "Never claim an action succeeded unless its tool result confirms it. Never fabricate an answer or action for a known capability gap. "
+        "Never save, repeat, or expose credentials, passwords, secrets, or access tokens. "
+        "Only save long-term memories when explicitly asked. Never expose tool schemas, JSON, internal reasoning, or debug details."
     )
-    words = set(w.lower() for w in user_text.split() if len(w) > 2)
-    all_facts = store.list_facts(limit=config.MAX_MEMORIES_IN_PROMPT)
-    if words:
-        relevant_facts = [f for f in all_facts if any(w in f[1].lower() for w in words)]
-    else:
-        relevant_facts = []
-    facts_to_show = relevant_facts if relevant_facts else all_facts[:10]
-    if facts_to_show:
-        prompt += "\n\nKnown facts about the user:\n" + "\n".join(f"- {c}" for _, c in reversed(facts_to_show))
+    if runtime_context:
+        prompt += "\n\nRelevant short-term context:\n" + json.dumps(runtime_context, ensure_ascii=False)
+    if structured_request:
+        prompt += "\n\nStructured request:\n" + json.dumps(structured_request, ensure_ascii=False)
+
+    lowered = user_text.lower()
+    if any(term in lowered for term in ("what do you remember", "what do you know about me", "my saved fact")):
+        facts = store.list_facts(limit=config.MAX_MEMORIES_IN_PROMPT)
+        words = {word for word in re.findall(r"[a-z0-9]+", lowered) if len(word) > 3}
+        relevant = [item for item in facts if any(word in item[1].lower() for word in words)]
+        selected = (relevant or facts[:5])[:5]
+        if selected:
+            prompt += "\n\nRelevant long-term memories:\n" + "\n".join(f"- {fact}" for _, fact in selected)
+
+    if any(term in lowered for term in ("previous task", "last task", "earlier", "what did we", "continue", "again")):
+        episodes = store.list_task_episodes(limit=3)
+        if episodes:
+            prompt += "\n\nRecent task outcomes:\n" + "\n".join(
+                f"- {goal}: {summary}" for _, goal, summary, _created_at in reversed(episodes)
+            )
     return prompt

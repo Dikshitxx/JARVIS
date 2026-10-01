@@ -80,6 +80,8 @@ register(Tool(
     description="Get the current local date and time. Use this whenever the user asks about the time or date.",
     parameters={"type": "object", "properties": {}},
     func=get_time,
+    keywords=("time", "date", "day", "current local time"),
+    parallel_safe=True,
 ))
 
 register(Tool(
@@ -87,6 +89,8 @@ register(Tool(
     description="Get real-time RAM, CPU and disk usage of this computer. Use this when the user asks about system resources or performance.",
     parameters={"type": "object", "properties": {}},
     func=get_system_info,
+    keywords=("ram", "memory use", "cpu", "disk", "system status", "performance", "telemetry"),
+    parallel_safe=True,
 ))
 
 register(Tool(
@@ -100,6 +104,8 @@ register(Tool(
         "required": ["expression"],
     },
     func=calculate,
+    keywords=("calculate", "compute", "arithmetic", "math", "sum", "product"),
+    parallel_safe=True,
 ))
 
 register(Tool(
@@ -111,4 +117,6 @@ register(Tool(
         "required": ["location"],
     },
     func=get_weather,
+    keywords=("weather", "temperature", "forecast", "wind", "humidity"),
+    parallel_safe=True,
 ))

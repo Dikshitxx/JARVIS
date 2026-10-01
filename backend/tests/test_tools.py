@@ -48,6 +48,63 @@ def test_classify_open_app_unknown_is_safe():
     assert decision == "ALLOW"
 
 
+def test_open_app_launches_windows_explorer_when_shell_windows_are_present(monkeypatch):
+    import types
+
+    from app.tools import apps
+
+    class FakeWindow:
+        def __init__(self, title: str):
+            self._title = title
+
+        def window_text(self):
+            return self._title
+
+        def process_id(self):
+            return 1234
+
+    class FakeDesktop:
+        def windows(self):
+            return [FakeWindow("Taskbar"), FakeWindow("Program Manager")]
+
+    fake_pywinauto = types.SimpleNamespace(Desktop=FakeDesktop)
+    monkeypatch.setitem(__import__("sys").modules, "pywinauto", fake_pywinauto)
+    monkeypatch.setattr(apps, "_process_names", lambda _app_name: {"explorer.exe"})
+    monkeypatch.setattr(apps, "_wait_for_window", lambda *_args, **_kwargs: True)
+    called = {}
+
+    def fake_popen(args, shell=False, creationflags=0):
+        called["args"] = args
+        called["shell"] = shell
+        called["creationflags"] = creationflags
+        return object()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    result = apps.open_app("explorer")
+
+    assert result.status == "success"
+    assert result.message.startswith("Opened explorer")
+    assert called["args"][0].lower().endswith("explorer.exe")
+
+
+def test_open_app_opens_whatsapp_web(monkeypatch):
+    from app.tools import apps
+    called = {}
+
+    def fake_open_url(url):
+        called["url"] = url
+        return type("R", (), {"status": "success"})()
+
+    monkeypatch.setattr(apps, "_matching_windows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.tools.browser.open_url", fake_open_url)
+
+    result = apps.open_app("whatsapp")
+
+    assert result.status == "success"
+    assert called["url"] == "https://web.whatsapp.com"
+
+
 # --- File sandbox ---
 
 def test_file_sandbox_blocks_outside_data_dir():
@@ -58,6 +115,27 @@ def test_file_sandbox_blocks_outside_data_dir():
 def test_file_sandbox_allows_data_dir():
     result = run_tool("list_files", {"path": "."})
     assert "error" not in result.lower() or "not a folder" not in result.lower()
+
+
+def test_find_file_searches_for_matching_folders_and_files(monkeypatch, tmp_path):
+    from app.tools import files
+
+    root = tmp_path / "Desktop"
+    folder = root / "Synaxis Project"
+    folder.mkdir(parents=True)
+    file_path = root / "synaxis-notes.txt"
+    file_path.write_text("test", encoding="utf-8")
+    monkeypatch.setattr(files, "_safe_roots", lambda: {
+        "desktop": root, "documents": root, "downloads": root, "data": root,
+    })
+
+    result = files.find_file("synaxis")
+
+    assert result.status == "success"
+    assert str(folder) in result.data["folders"]
+    assert str(file_path) in result.data["files"]
+    assert f"[folder] {folder}" in result.message
+    assert str(file_path) in result.message
 
 
 # --- Terminal allowlist ---

@@ -17,7 +17,7 @@ def _tool_call(name, arguments):
 
 
 @pytest.mark.parametrize("text", ["How are you?", "Tell me what you can do?"])
-def test_conversation_does_not_expose_action_tools(monkeypatch, text):
+def test_conversation_is_llm_handled_with_tool_descriptions_available(monkeypatch, text):
     seen = []
 
     def fake_chat(messages, tools=None):
@@ -28,7 +28,9 @@ def test_conversation_does_not_expose_action_tools(monkeypatch, text):
     reply = Agent().respond(text)
 
     assert "I can help" in reply
-    assert seen == [[]]
+    assert len(seen) == 1
+    names = {tool["function"]["name"] for tool in seen[0]}
+    assert {"search_web", "browser_open", "open_app"} <= names
 
 
 def test_time_request_uses_only_time_tool(monkeypatch):
@@ -36,10 +38,9 @@ def test_time_request_uses_only_time_tool(monkeypatch):
 
     def fake_get_time(name, args, confirmed=False):
         calls.append((name, args))
-        return "09:00 PM"
+        return ToolResult("success", "09:00 PM", verification_status="verified")
 
-    monkeypatch.setattr(agent_module, "run_tool", fake_get_time)
-    monkeypatch.setattr(router_module, "run_tool", fake_get_time)
+    monkeypatch.setattr(router_module, "run_tool_result", fake_get_time)
     reply = Agent().respond("What time is it?")
 
     assert calls == [("get_time", {})]
@@ -47,13 +48,20 @@ def test_time_request_uses_only_time_tool(monkeypatch):
 
 
 @pytest.mark.parametrize("text", ["Find files in my browser", "Delete files in my browser"])
-def test_browser_files_request_requires_clarification(monkeypatch, text):
-    monkeypatch.setattr(agent_module.client, "chat", lambda *args, **kwargs: pytest.fail("LLM should not be called"))
+def test_browser_files_request_reaches_llm_for_clarification(monkeypatch, text):
+    seen = []
+
+    def fake_chat(messages, tools=None):
+        seen.append(tools)
+        return _message("Do you mean downloaded files, files on a webpage, or files on your computer?")
+
+    monkeypatch.setattr(agent_module.client, "chat", fake_chat)
     reply = Agent().respond(text)
 
     assert "downloaded files" in reply
-    assert "bookmarks" in reply
     assert "computer" in reply
+    assert len(seen) == 1
+    assert "find_file" in {tool["function"]["name"] for tool in seen[0]}
 
 
 def test_whatsapp_greeting_is_drafted_and_requires_confirmation(monkeypatch):
@@ -74,9 +82,9 @@ def test_confirmed_whatsapp_uses_drafted_message(monkeypatch):
 
     def fake_send(name, args, confirmed=False):
         sent.append((name, args, confirmed))
-        return "Sent WhatsApp message to Ishan: Hello Ishan, how are you?"
+        return ToolResult("success", "Sent WhatsApp message to Ishan: Hello Ishan, how are you?", verification_status="verified")
 
-    monkeypatch.setattr(agent_module, "run_tool", fake_send)
+    monkeypatch.setattr(agent_module, "run_tool_result", fake_send)
     reply = agent.respond("yes")
 
     assert sent == [("send_whatsapp_message", {"contact": "Ishan", "message": "Hello Ishan, how are you?"}, True)]

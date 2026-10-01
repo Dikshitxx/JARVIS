@@ -10,3 +10,10 @@ pyautogui
 pywinauto
 playwright
 pyperclip
+faster-whisper
+openwakeword
+onnxruntime
+numpy
+webrtcvad-wheels
+sounddevice
+pyttsx3

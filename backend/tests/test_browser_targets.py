@@ -1,5 +1,8 @@
-from app.agent.agent import _select_relevant_tools
+from types import SimpleNamespace
+
+from app.tools import browser
 from app.tools.browser_targets import normalize_target, parse_browser_intent, resolve_target
+from app.tools.registry import REGISTRY
 
 
 def test_generic_browser_search_intents():
@@ -19,7 +22,7 @@ def test_generic_browser_search_intents():
 
 def test_general_search_is_not_targeted_browser_search():
     assert parse_browser_intent("Search the web for Jarvis AI.") is None
-    assert _select_relevant_tools("Search the web for Jarvis AI") == {"open_url", "search_web"}
+    assert "current external evidence" in REGISTRY["search_web"].description
 
 
 def test_open_and_ask_and_navigate_intents():
@@ -38,3 +41,33 @@ def test_aliases_and_unknown_targets():
     assert normalize_target("YT") == "youtube"
     assert resolve_target("ExampleSite") is None
     assert parse_browser_intent("Search X on ExampleSite")["target"] == "examplesite"
+
+
+def test_whatsapp_browser_target_is_registered():
+    assert resolve_target("whatsapp") is not None
+    assert resolve_target("whatsapp messenger").name == "whatsapp"
+    assert resolve_target("whatsapp web").name == "whatsapp"
+    assert normalize_target("WhatsApp Messenger") == "whatsapp"
+    assert parse_browser_intent("Open WhatsApp Messenger.") == {
+        "intent": "browser_open",
+        "target": "whatsapp",
+        "query": "",
+        "operation": "open",
+    }
+
+
+def test_brave_navigation_reports_verified_page_url(monkeypatch):
+    class FakeSession:
+        def run(self, func):
+            return func()
+
+        def page(self, _key, url):
+            return SimpleNamespace(url=url)
+
+    monkeypatch.setattr(browser, "get_browser_session", lambda: FakeSession())
+
+    result = browser._launch_brave("https://en.wikipedia.org/w/index.php?search=floods", "search_web", "floods")
+
+    assert result.status == "success"
+    assert result.verification_status == "verified"
+    assert "https://en.wikipedia.org/w/index.php?search=floods" in result.message

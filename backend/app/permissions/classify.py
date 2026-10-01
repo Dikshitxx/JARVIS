@@ -2,6 +2,14 @@ from typing import Literal
 from app.tools.registry import REGISTRY
 
 Decision = Literal["ALLOW", "CONFIRM", "BLOCK"]
+CONFIRM_TOOLS = {
+    "send_whatsapp_message",
+    "close_app",
+    "take_screenshot",
+    "find_project_deep",
+    "start_project",
+    "stop_project",
+}
 
 
 def classify(tool_name: str, args: dict) -> tuple[Decision, str]:
@@ -24,16 +32,8 @@ def classify(tool_name: str, args: dict) -> tuple[Decision, str]:
         if _SECRET_PATTERN.search(fact_text):
             return "BLOCK", "credential-like content detected"
 
-    # Special case: open_app has argument-dependent confirmation logic.
-    if tool_name == "open_app":
-        from app.tools.apps import _needs_confirm
-        if _needs_confirm(args):
-            return "CONFIRM", "app not in configured allowlist"
-        return "ALLOW", "app is in configured allowlist"
-
-    # Default: static risk level from the tool's registration.
     if tool.risk == "blocked":
         return "BLOCK", "tool is statically blocked"
-    if tool.risk == "confirm":
-        return "CONFIRM", "tool requires confirmation by default"
+    if tool_name in CONFIRM_TOOLS:
+        return "CONFIRM", "tool requires confirmation"
     return "ALLOW", "tool is safe by default"

@@ -14,46 +14,10 @@ exist. None of that is trusted — every call is checked here first.
 import re
 
 REMEMBER_TOOLS = {"remember_fact", "remember_person"}
-ACTION_TOOLS = {"type_text", "click_mouse", "move_mouse", "press_key"}
 
 REMEMBER_TRIGGERS = {"remember", "save", "note", "don't forget", "dont forget"}
-ACTION_TRIGGERS = {
-    "type", "write", "insert", "click", "move mouse", "move the mouse",
-    "press", "press key", "search", "open", "play", "pause", "stop",
-    "resume", "message", "send", "close",
-}
-
-# Capabilities with NO real tool behind them. Checked BEFORE the LLM is even
-# called, so the model never gets a chance to fabricate a fake result for
-# something JARVIS genuinely cannot do yet. Add to this list as new gaps
-# are discovered, rather than hoping prompt wording stops fabrication.
-KNOWN_GAPS = {
-    "email": "checking or sending email",
-    "gmail": "checking or sending email",
-    "inbox": "checking email",
-    "calendar": "checking your calendar",
-    "sms": "sending text messages",
-    "text message": "sending text messages",
-    "phone call": "making phone calls",
-    "call someone": "making phone calls",
-}
-
-BROWSER_FILES_CLARIFICATION = (
-    "Do you mean downloaded files, files visible on a webpage, bookmarks, "
-    "or files on your computer?"
-)
-
-
-def check_known_gap(user_text: str) -> str | None:
-    """Returns a plain 'not implemented' message if the request matches a
-    known capability gap, else None. Called BEFORE the LLM, so no tool call
-    or fabrication is ever possible for these."""
-    lowered = user_text.lower()
-    for keyword, description in KNOWN_GAPS.items():
-        if keyword in lowered:
-            return f"That's not something I can do yet, boss — {description} isn't implemented in me right now."
-    return None
-
+VISION_TOOLS = {"look_at_screen"}
+VISION_TRIGGERS = {"screen", "see", "look at", "what does", "is this", "showing"}
 
 def _looks_like_fabricated_placeholder(value: str) -> bool:
     """Catches cases like the model inventing an 'error message' as the
@@ -66,6 +30,14 @@ def _looks_like_fabricated_placeholder(value: str) -> bool:
     return False
 
 
+def _has_remember_trigger(user_text: str) -> bool:
+    return any(re.search(rf"\b{re.escape(trigger)}\b", user_text, re.I) for trigger in REMEMBER_TRIGGERS)
+
+
+def _has_vision_trigger(user_text: str) -> bool:
+    return any(re.search(rf"\b{re.escape(trigger)}\b", user_text, re.I) for trigger in VISION_TRIGGERS)
+
+
 def validate_call(tool_name: str, args: dict, user_text: str) -> str | None:
     """
     Returns a Skipped/Refused reason string if this call should NOT execute,
@@ -75,12 +47,15 @@ def validate_call(tool_name: str, args: dict, user_text: str) -> str | None:
     lowered_text = user_text.lower()
 
     if tool_name in REMEMBER_TOOLS:
-        if not any(t in lowered_text for t in REMEMBER_TRIGGERS):
+        if not _has_remember_trigger(lowered_text):
             return f"Skipped: {tool_name} was not called because the user did not ask to remember, save, or note anything."
 
-    if tool_name in ACTION_TOOLS:
-        if not any(t in lowered_text for t in ACTION_TRIGGERS):
-            return f"Skipped: {tool_name} was not called because the user's message didn't ask for an on-screen action."
+    if tool_name in VISION_TOOLS:
+        if not _has_vision_trigger(lowered_text):
+            return f"Skipped: {tool_name} was not called because the user did not ask about visible content."
+
+    if tool_name == "clear_text" and not re.search(r"\b(?:clear|erase|empty|delete|remove)\b", lowered_text):
+        return "Skipped: clear_text was not called because the user did not ask to clear or delete text."
 
     if tool_name == "send_whatsapp_message":
         contact = str(args.get("contact", "")).strip()
@@ -93,19 +68,13 @@ def validate_call(tool_name: str, args: dict, user_text: str) -> str | None:
     return None
 
 
-def check_ambiguous_request(user_text: str) -> str | None:
-    """Stop ambiguous browser/files requests before the model can guess."""
-    lowered = user_text.lower()
-    browser_terms = ("browser", "webpage", "web page", "website")
-    file_terms = ("file", "files", "folder", "folders", "download", "downloads")
-    if any(term in lowered for term in browser_terms) and any(term in lowered for term in file_terms):
-        return BROWSER_FILES_CLARIFICATION
-    return None
-
-
 def prepare_call(tool_name: str, args: dict) -> dict:
     """Make narrow, deterministic repairs to arguments before validation."""
     prepared = dict(args or {})
+    if tool_name == "look_at_screen":
+        question = str(prepared.get("question", "")).strip()
+        if len(question.split()) < 3:
+            prepared["question"] = "Describe the visible foreground window and read any clearly visible text."
     if tool_name == "send_whatsapp_message":
         contact = str(prepared.get("contact", "")).strip()
         message = str(prepared.get("message", "")).strip().lower()

@@ -1,11 +1,15 @@
 import json
+import difflib
 import os
+import re
 import shlex
+import shutil
 import socket
 import subprocess
 import time
 from pathlib import Path
 
+from app.core import config
 from app.tools.registry import Tool, register
 
 PROJECT_MARKERS = {"package.json", "requirements.txt", "pyproject.toml", ".git"}
@@ -13,11 +17,19 @@ PROJECT_MARKERS = {"package.json", "requirements.txt", "pyproject.toml", ".git"}
 FAST_SEARCH_ROOTS = [
     Path.home() / "Desktop",
     Path.home() / "Documents",
+    Path.home() / "Downloads",
     Path.home(),
-    Path("C:/"),
+    Path("C:/Projects"),
+    Path("C:/src"),
+    Path("C:/dev"),
+    Path("C:/Code"),
 ]
 
-MAX_DEPTH = 2
+MAX_DEPTH = 5
+_SKIP_DIRS = {
+    "node_modules", "__pycache__", ".venv", "venv", "windows", "program files",
+    "program files (x86)", "programdata", "appdata", "$recycle.bin", "system volume information",
+}
 
 
 def _is_project_dir(path: Path) -> bool:
@@ -37,9 +49,13 @@ def _search(root: Path, name_lower: str, max_depth: int) -> Path | None:
             if depth >= max_depth:
                 dirnames[:] = []
                 continue
-            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in {"node_modules", "__pycache__", ".venv", "venv"}]
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d.lower() not in _SKIP_DIRS]
             for d in dirnames:
-                if name_lower in d.lower():
+                score = max(
+                    [difflib.SequenceMatcher(None, name_lower, d.lower()).ratio()]
+                    + [difflib.SequenceMatcher(None, name_lower, token).ratio() for token in re.split(r"[\s._-]+", d.lower())]
+                )
+                if name_lower in d.lower() or (len(name_lower) >= 5 and score >= 0.78):
                     candidate = Path(dirpath) / d
                     if _is_project_dir(candidate):
                         return candidate
@@ -49,7 +65,7 @@ def _search(root: Path, name_lower: str, max_depth: int) -> Path | None:
 
 
 def find_project(name: str) -> str:
-    name_lower = name.strip().lower()
+    name_lower = re.sub(r"\s+project$", "", name.strip(), flags=re.I).lower()
     if not name_lower:
         return "Error: no project name given."
 
@@ -65,13 +81,15 @@ def find_project(name: str) -> str:
 
 
 def find_project_deep(name: str) -> str:
-    name_lower = name.strip().lower()
+    name_lower = re.sub(r"\s+project$", "", name.strip(), flags=re.I).lower()
     if not name_lower:
         return "Error: no project name given."
-    found = _search(Path("C:/"), name_lower, max_depth=6)
-    if found:
-        return f"Found: {found}"
-    return f"Could not find a project matching '{name}' on C:\\ drive."
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = Path(f"{letter}:/")
+        found = _search(root, name_lower, max_depth=8)
+        if found:
+            return f"Found: {found}"
+    return f"Could not find a project matching '{name}' on the available drives."
 
 
 register(Tool(
@@ -87,7 +105,7 @@ register(Tool(
 
 register(Tool(
     name="find_project_deep",
-    description="Search the entire C: drive for a project folder by name. Slow (can take a minute). Only use this if find_project already failed and the user wants a deeper search. This needs the user's confirmation.",
+    description="Search all available fixed drives for a project folder by name. Slow. Use after common folders fail when the user asked for a deeper search. This needs the user's confirmation.",
     parameters={
         "type": "object",
         "properties": {"name": {"type": "string", "description": "The project name to search for"}},
@@ -95,6 +113,57 @@ register(Tool(
     },
     func=find_project_deep,
     risk="confirm",
+))
+
+
+def open_project_in_vscode(name: str = "", path: str = "") -> str:
+    """Find a named local project (or use its explicit path) and open it in VS Code."""
+    requested = (path or name).strip().strip("'\"` ")
+    if not requested:
+        return "Tell me a project name or its full folder path."
+
+    project = Path(requested).expanduser()
+    if not project.is_dir():
+        project = None
+        query = re.sub(r"\s+project$", "", requested, flags=re.I).strip().lower()
+        for root in FAST_SEARCH_ROOTS:
+            project = _search(root, query, MAX_DEPTH)
+            if project:
+                break
+        if project is None:
+            for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+                project = _search(Path(f"{letter}:/"), query, max_depth=8)
+                if project:
+                    break
+    if project is None or not project.is_dir():
+        return f"I couldn't find a project matching '{requested}' on the available drives."
+
+    from app.tools.apps import _find_executable
+
+    executable = _find_executable(config.ALLOWED_APPS.get("vscode", [])) or shutil.which("code")
+    if not executable:
+        return "I found the project, but couldn't find the VS Code executable."
+    try:
+        subprocess.Popen(
+            [executable, str(project.resolve())], shell=False,
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+    except Exception as exc:
+        return f"I found {project}, but failed to open it in VS Code: {exc}"
+    return f"Opened project folder {project.resolve()} in VS Code."
+
+
+register(Tool(
+    name="open_project_in_vscode",
+    description="Open a local project folder in VS Code. Accepts a full folder path; if only a project name is given, searches common folders and then available drives, including fuzzy spelling matches.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Project name to discover on disk"},
+            "path": {"type": "string", "description": "Optional full folder path"},
+        },
+    },
+    func=open_project_in_vscode,
 ))
 
 

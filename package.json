@@ -1,0 +1,9 @@
+{
+  "name": "jarvis-root",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix frontend run dev -- --hostname 0.0.0.0 --port 3000",
+    "build": "npm --prefix frontend run build",
+    "start": "npm --prefix frontend run start -- --hostname 0.0.0.0 --port 3000"
+  }
+}

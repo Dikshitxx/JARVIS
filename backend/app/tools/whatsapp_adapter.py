@@ -16,7 +16,24 @@ class WhatsAppAdapter:
         try:
             search.fill(contact)
             page.wait_for_timeout(1500)
-            page.locator(f'span[title="{contact}"]').click()
+            candidates = page.locator("span[title]")
+            exact_matches = []
+            partial_matches = []
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+                title = (candidate.get_attribute("title") or "").strip()
+                if title.casefold() == contact.casefold():
+                    exact_matches.append(candidate)
+                elif contact.casefold() in title.casefold():
+                    partial_matches.append(candidate)
+            matches = exact_matches or partial_matches
+            if len(matches) != 1:
+                return ToolResult(
+                    "clarification_required" if matches else "failure",
+                    f"I couldn't uniquely match the WhatsApp contact '{contact}'. Nothing was sent.",
+                    verification_status="failed",
+                )
+            matches[0].click()
             composer = page.locator('div[contenteditable="true"][data-tab="10"]')
             composer.wait_for(state="visible", timeout=10000)
             before = page.locator("div.message-out").count()

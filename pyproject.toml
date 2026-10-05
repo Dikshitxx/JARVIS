@@ -1,5 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "jarvis-root-do-not-use"
+name = "jarvish"
 version = "0.0.0"
 requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "ollama",
+    "openai",
+    "python-dotenv",
+    "pydantic",
+    "pydantic-settings",
+    "psutil",
+    "pillow",
+    "pyautogui",
+    "pywinauto",
+    "playwright",
+    "pyperclip",
+    "faster-whisper",
+    "openwakeword",
+    "onnxruntime",
+    "numpy",
+    "webrtcvad-wheels",
+    "sounddevice",
+    "pyttsx3",
+]
 
+[project.scripts]
+jarvish = "app.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["app*"]

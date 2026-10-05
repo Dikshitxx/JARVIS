@@ -77,10 +77,10 @@ def get_weather(location: str = "") -> str:
 
 register(Tool(
     name="get_time",
-    description="Get the current local date and time. Use this whenever the user asks about the time or date.",
+    description="Get the local date and time. Use this whenever the user asks about the time or date.",
     parameters={"type": "object", "properties": {}},
     func=get_time,
-    keywords=("time", "date", "day", "current local time"),
+    keywords=("time", "date", "day"),
     parallel_safe=True,
 ))
 
@@ -91,6 +91,7 @@ register(Tool(
     func=get_system_info,
     keywords=("ram", "memory use", "cpu", "disk", "system status", "performance", "telemetry"),
     parallel_safe=True,
+    metadata={"direct_information": True, "offline_summary": "check this computer's system status"},
 ))
 
 register(Tool(

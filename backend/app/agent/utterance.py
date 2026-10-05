@@ -36,6 +36,10 @@ _SOCIAL_RE = re.compile(
 _QUESTION_RE = re.compile(r"^\s*(?:what|who|why|how|when|where|which|is|are|can|could|would)\b", re.I)
 _REQUEST_LEAD_RE = re.compile(r"^\s*(?:please\b|can\s+you\b|could\s+you\b|would\s+you\b|i\s+(?:want|need)\s+you\s+to\b)", re.I)
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_NON_ENGLISH_ACTION_RE = re.compile(
+    r"\b(?:abre|abrir|lanza|inicia|busca|escribe|ouvre|ouvrir|öffne|öffnen|打开|搜索)\b",
+    re.I,
+)
 _STOP_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from",
     "get", "give", "how", "i", "in", "is", "it", "me", "my", "of", "on",
@@ -97,6 +101,8 @@ def analyze_utterance(text: str, context: dict | None = None, has_pending: bool 
     pronoun_reference = bool(re.search(r"\b(?:it|that|this)\b", lowered))
     has_context = _has_recent_context(context)
     information_tools = _matching_information_tools(lowered)
+    external_fact_hint = bool(_EXTERNAL_FACT_HINT_RE.search(lowered))
+    contextual_external_fact = _continues_external_fact_context(lowered, context)
     refers = lexical_reference or (pronoun_reference and not (information_tools and not lexical_reference))
     refers_to_context = refers and has_context
     request_lead = bool(_REQUEST_LEAD_RE.search(lowered))
@@ -104,6 +110,9 @@ def analyze_utterance(text: str, context: dict | None = None, has_pending: bool 
     action_tokens = set(tokens & _ACTION_VERBS)
     if re.match(r"^(?:tell\s+me\s+)?(?:what|who|why|how|when|where|which|is|are|can|could|would)\b", lowered):
         action_tokens.discard("tell")
+    if information_tools and re.match(r"^(?:(?:can|could)\s+you\s+)?tell\s+me\s+about\b", lowered):
+        action_tokens.discard("tell")
+        request_lead = False
     has_action = bool(action_tokens) or request_lead or has_vision_request
     action_count = len(action_tokens)
 
@@ -111,7 +120,7 @@ def analyze_utterance(text: str, context: dict | None = None, has_pending: bool 
     # General factual questions are conversation unless they match a registered
     # current-information tool (for example, time, weather, or system telemetry).
     is_question = bool(_QUESTION_RE.search(lowered))
-    conversational_question = is_question and not information_tools
+    conversational_question = is_question and not information_tools and not external_fact_hint
     is_conversation = (social_clause and not has_action) or (
         conversational_question and not has_action and not refers_to_context
     )
@@ -124,7 +133,7 @@ def analyze_utterance(text: str, context: dict | None = None, has_pending: bool 
         kind = "follow_up"
     elif has_action:
         kind = "action"
-    elif information_tools:
+    elif information_tools or external_fact_hint or contextual_external_fact:
         kind = "information"
     elif _CANCEL_RE.search(lowered):
         kind = "cancellation"
@@ -148,6 +157,10 @@ def relevant_tool_names(
 ) -> set[str] | None:
     """Use tool metadata to narrow schemas; return None when reasoning is needed."""
     if analysis.kind in {"conversation", "cancellation", "confirmation"}:
+        # Preserve model fallback for clear commands in languages the lightweight
+        # English intent parser does not understand.
+        if analysis.kind == "conversation" and _NON_ENGLISH_ACTION_RE.search(text):
+            return None
         return set()
     eligible = names_for_capabilities(capabilities) if capabilities is not None else None
     if analysis.kind == "follow_up" or analysis.kind == "mixed":
@@ -158,6 +171,10 @@ def relevant_tool_names(
         names = _matching_information_tools(text)
         if eligible is not None:
             names &= eligible
+        if not names and (_EXTERNAL_FACT_HINT_RE.search(text) or _continues_external_fact_context(text, context)):
+            names.add("search_web")
+        if "search_web" in names:
+            names.add("fetch_web_page")
         return names or set()
 
     scores: list[tuple[int, str]] = []
@@ -175,8 +192,35 @@ def relevant_tool_names(
             scores.append((score, tool.name))
 
     if not scores:
-        return eligible if eligible is not None else None
-    scores.sort(reverse=True)
-    best = scores[0][0]
-    # Keep ties and close matches; the model resolves which operation fits.
-    return {name for score, name in scores if score >= max(1, best - 1)}
+        names = set(eligible or ())
+    else:
+        scores.sort(reverse=True)
+        best = scores[0][0]
+        # Keep ties and close matches; the model resolves which operation fits.
+        names = {name for score, name in scores if score >= max(1, best - 1)}
+    if re.search(r"\bfiles?\b.*\b(?:browser|webpage|website)\b|\b(?:browser|webpage|website)\b.*\bfiles?\b", text, re.I):
+        names.add("find_file")
+    if _EXTERNAL_FACT_HINT_RE.search(text) and eligible is not None and "information" in capabilities:
+        names.add("search_web")
+    return names
+
+
+_EXTERNAL_FACT_HINT_RE = re.compile(
+    r"\b(?:current(?:ly)?|latest|recent|today|right\s+now|this\s+year|this\s+month|weather)\b",
+    re.I,
+)
+
+
+def _continues_external_fact_context(text: str, context: dict | None) -> bool:
+    if not context:
+        return False
+    last_query = str(context.get("last_search_query") or context.get("last_query") or "")
+    recent_turns = [
+        str(turn.get("user", ""))
+        for turn in (context.get("recent_turns") or [])[-3:]
+        if isinstance(turn, dict) and turn.get("intent") == "information"
+    ]
+    if not any(_EXTERNAL_FACT_HINT_RE.search(value) for value in (last_query, *recent_turns)):
+        return False
+    tokens = _tokens(text)
+    return 0 < len(tokens) <= 3

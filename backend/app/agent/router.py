@@ -1,43 +1,113 @@
-"""
-Fast deterministic intent router.
-Matches simple, unambiguous commands to a tool call WITHOUT calling the LLM.
-Falls through to the normal agent loop (LLM + tools) for anything not matched here.
-Only add patterns here for commands that are genuinely unambiguous — if a
-phrasing could mean several things, let the LLM handle it instead.
-"""
+"""Resolve only high-confidence request intents declared by registered tools."""
 
 import re
-import logging
 
-from app.tools.registry import run_tool_result, NeedsConfirmation, ToolResult
-from app.tools.browser_targets import parse_browser_intent, resolve_target
-from app.tools.apps import resolve_application_name
-from app.agent.runtime_context import contextual_browser_intent
 from app.agent.request import UserRequest, build_user_request
+from app.agent.utterance import relevant_tool_names
+from app.tools.registry import REGISTRY
+from app.tools.apps import resolve_application_name
+from app.tools.browser_targets import resolve_target
 
-log = logging.getLogger("jarvis.router")
 
-_OPEN_FAST_RE = re.compile(r"^open\s+(.+)$", re.I)
-_PLAY_YOUTUBE_FAST_RE = re.compile(r"^play\s+([\w'-]+)\s+on\s+youtube$", re.I)
-_TIME_FAST_RE = re.compile(r"^(?:what time is it|what(?:'s| is) the time|tell me the time|current time)$", re.I)
+def _route_value(value, request: UserRequest, context: dict):
+    if not isinstance(value, str) or not value.startswith("$"):
+        return value
+    source, _, field = value[1:].partition(".")
+    if source == "request":
+        return getattr(request, field, "")
+    if source == "context":
+        return context.get(field, "")
+    if source == "entity":
+        return next((item.value for item in request.entities if item.kind == field), "")
+    if source == "modifier":
+        prefix = f"{field}="
+        return next((item[len(prefix):] for item in request.modifiers if item.startswith(prefix)), "")
+    return ""
+
+
+def _tool_args(bindings: dict, request: UserRequest, context: dict) -> dict:
+    arguments = {}
+    for name, value in bindings.items():
+        resolved = _route_value(value, request, context)
+        if resolved not in (None, ""):
+            arguments[name] = resolved
+    return arguments
+
+
+def _private_safe(tool) -> bool:
+    if (tool.metadata or {}).get("private_safe"):
+        return True
+    return not (tool.resource in {"browser", "internet"} or tool.capabilities & {"browser", "messaging"})
+
+
+def try_fast_route(
+    user_text: str,
+    context: dict | None = None,
+    request: UserRequest | None = None,
+    *,
+    private: bool = False,
+) -> tuple[str, dict] | None:
+    """Return a registered direct route only for a confident typed intent."""
+    context = context or {}
+    request = request or build_user_request(user_text, context)
+    if request.confidence < 0.8:
+        return None
+    for tool in REGISTRY.values():
+        if private and not _private_safe(tool):
+            continue
+        routes = (tool.metadata or {}).get("direct_routes", {})
+        bindings = routes.get(request.intent)
+        if bindings is not None:
+            arguments = _tool_args(bindings, request, context)
+            references = request.context_references or (
+                () if not request.analysis or not request.analysis.refers_to_context else ("context",)
+            )
+            unresolved = any(
+                re.search(r"\b(?:same|another|again|previous|it|that|this|there)\b", str(value), re.I)
+                for key, value in arguments.items() if key != "target"
+            )
+            if references and (unresolved or not any(arguments.values())):
+                continue
+            return tool.name, arguments
+
+    if request.intent == "information_request" and request.analysis is not None:
+        names = relevant_tool_names(
+            user_text, request.analysis, context, capabilities=request.capabilities,
+        )
+        tools = [
+            REGISTRY[name] for name in (names or set())
+            if name in REGISTRY and REGISTRY[name].metadata.get("direct_information")
+            and not (private and not _private_safe(REGISTRY[name]))
+            and not (REGISTRY[name].parameters or {}).get("required")
+        ]
+        if len(tools) == 1:
+            return tools[0].name, {}
+    return None
+
+
+def capabilities_response(*, private: bool = False) -> str:
+    available = sorted({
+        str(tool.metadata["offline_summary"]).strip()
+        for tool in REGISTRY.values()
+        if tool.metadata.get("offline_summary")
+        and (tool.metadata.get("direct_routes") or tool.metadata.get("direct_information"))
+        and (not private or _private_safe(tool))
+    })
+    if not available:
+        return "I can handle clear requests that match my registered tools. Broader requests need an available language model."
+    return (
+        "Without a language model, I can still " + "; ".join(available)
+        + ". Broader or ambiguous requests need an available language model. "
+        "Protected actions may ask for confirmation, and external services must be available."
+    )
 
 
 def is_fast_route_candidate(user_text: str) -> bool:
-    """Only exact, short open and YouTube play phrases use the deterministic path."""
-    text = re.sub(r"[.!?]+$", "", (user_text or "").strip())
-    if _TIME_FAST_RE.fullmatch(text):
-        return True
-    words = text.split()
-    if not 2 <= len(words) <= 4:
-        return False
-    opened = _OPEN_FAST_RE.fullmatch(text)
-    if opened:
-        target = opened.group(1).strip()
-        return resolve_target(target) is not None or resolve_application_name(target) is not None
-    return bool(_PLAY_YOUTUBE_FAST_RE.fullmatch(text))
+    return try_fast_route(user_text) is not None
 
 
 def _open_target_or_app(value: str) -> tuple[str, dict]:
+    """Resolve a target for legacy callers without executing a tool."""
     target = resolve_target(value)
     if target is not None:
         return "browser_open", {"target": target.name}
@@ -45,113 +115,3 @@ def _open_target_or_app(value: str) -> tuple[str, dict]:
     if application is not None:
         return "open_app", {"name": application}
     return "browser_open", {"target": ""}
-
-
-def _run_browser_intent(intent: dict):
-    tool_name = intent["intent"]
-    args = {key: intent[key] for key in ("target", "query") if intent.get(key)}
-    return tool_name, run_tool_result(tool_name, args), args
-
-
-def _route_request(request: UserRequest) -> tuple[str, ToolResult, dict] | None:
-    intent = request.intent
-    target = request.target
-    args: dict
-    tool_name: str
-    if intent == "open_target":
-        return "browser_open", ToolResult(
-            "clarification_required",
-            f"I couldn't resolve '{next((entity.value for entity in request.entities if entity.kind == 'unresolved_target'), '')}' to an installed application or website. Please give me its full name or URL.",
-        ), {}
-    if intent == "open_application":
-        tool_name, args = "open_app", {"name": target}
-    elif intent == "open_website":
-        tool_name, args = "browser_open", {"target": target}
-        browser = next((modifier.split("=", 1)[1] for modifier in request.modifiers if modifier.startswith("browser=")), "")
-        if browser:
-            args["browser"] = browser
-    elif intent == "search_web":
-        tool_name, args = "search_web", {"query": request.query, "target": target or ""}
-    elif intent in {"browser_search", "browser_interaction"}:
-        tool_name = intent
-        args = {"target": target, "query": request.query}
-    elif intent == "search_in_application":
-        tool_name, args = "search_in_application", {"name": target, "query": request.query}
-    elif intent == "play_media_content":
-        tool_name = "play_youtube_song"
-        args = {"query": request.query or "music", "avoid_current": "avoid_current" in request.modifiers}
-        for modifier in request.modifiers:
-            if modifier.startswith("result_index="):
-                requested_index = int(modifier.split("=", 1)[1])
-                args["result_index"] = 11 if requested_index < 0 else min(11, requested_index)
-    elif intent == "pause_current_media":
-        tool_name, args = "control_media", {"action": "pause"}
-    elif intent == "resume_current_media":
-        tool_name, args = "control_media", {"action": "resume"}
-    elif intent == "inspect_current_media":
-        tool_name, args = "inspect_current_media", {}
-    elif intent == "inspect_current_page":
-        tool_name, args = "inspect_current_page", {}
-    elif intent == "inspect_application":
-        tool_name, args = "inspect_application", {"name": target}
-    elif intent == "open_project":
-        tool_name, args = "open_project_in_vscode", {"name": target}
-    elif intent == "send_whatsapp_message":
-        tool_name, args = "send_whatsapp_message", {"contact": target, "message": request.query}
-    elif intent == "copy_application_text":
-        tool_name, args = "copy_application_text", {"target_window": target}
-    elif intent in {"type_text", "copy_selection", "paste_text"}:
-        if not request.target:
-            noun = "type into" if intent == "type_text" else "paste into" if intent == "paste_text" else "copy from"
-            return intent, ToolResult("clarification_required", f"Which open window should I {noun}?"), {}
-        tool_name = intent
-        args = {"target_window": request.target}
-        if intent == "type_text":
-            args["text"] = request.query
-    else:
-        return None
-    try:
-        return tool_name, run_tool_result(tool_name, args), args
-    except NeedsConfirmation as need:
-        return need.tool_name, ToolResult("confirmation_required", f"Confirm: {need.tool_name}"), need.tool_args
-
-
-def try_fast_route(
-    user_text: str,
-    context: dict | None = None,
-    request: UserRequest | None = None,
-) -> tuple[str, ToolResult | str, dict] | None:
-    """
-    Returns (tool_name, result_or_confirm_message, args) if a deterministic
-    match ran, else None (meaning: fall through to the normal LLM agent loop).
-    """
-    text = re.sub(r"[.!?]+$", "", (user_text or "").strip())
-    if not is_fast_route_candidate(text):
-        return None
-
-    match = _TIME_FAST_RE.fullmatch(text)
-    if match:
-        tool_name, args = "get_time", {}
-    else:
-        match = _OPEN_FAST_RE.fullmatch(text)
-        if match:
-            target_text = match.group(1).strip()
-            tool_name, args = _open_target_or_app(target_text)
-            if tool_name == "browser_open" and not args.get("target"):
-                return None
-            if tool_name == "browser_open":
-                target = resolve_target(target_text)
-                if target and target.name in {"wikipedia", "youtube", "google", "github", "reddit"}:
-                    tool_name, args = "open_and_remember_site", {"site_name": target.name}
-        else:
-            match = _PLAY_YOUTUBE_FAST_RE.fullmatch(text)
-            if not match:
-                return None
-            tool_name, args = "play_youtube_song", {"query": match.group(1)}
-    log.info("FAST ROUTE matched %r -> %s %s", text, tool_name, args)
-
-    try:
-        result = run_tool_result(tool_name, args)
-        return tool_name, result, args
-    except NeedsConfirmation as need:
-        return tool_name, f"Confirm: {need.tool_name} {need.tool_args}? Reply 'yes' or 'no'.", args

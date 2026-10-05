@@ -280,6 +280,11 @@ def test_agent_observes_sequential_llm_tool_calls_without_parser_overrides(monke
 
     def fake_chat(_messages, tools=None):
         if tools == []:
+            if "requested_deliverable_complete" in _messages[0]["content"]:
+                return SimpleNamespace(
+                    content='{"requested_deliverable_complete":true}',
+                    tool_calls=[],
+                )
             return SimpleNamespace(content='{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}', tool_calls=[])
         exposed.append([item["function"]["name"] for item in (tools or [])])
         return replies.pop(0)

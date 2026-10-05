@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.core import config
 from app.llm import llm
 
@@ -19,6 +21,11 @@ class _FakeClient:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+@pytest.fixture(autouse=True)
+def reset_provider_metrics(monkeypatch):
+    monkeypatch.setattr(llm, "_PROVIDER_METRICS", {})
 
 
 def test_invalid_gemini_key_falls_back_to_groq(monkeypatch):
@@ -103,6 +110,85 @@ def test_private_request_uses_only_local_and_parses_tool_arguments(monkeypatch):
     assert result["tool_calls"] == [{
         "id": "call-1", "name": "get_time", "arguments": {"timezone": "UTC"},
     }]
+
+
+def test_profile_provider_ranking_drives_chat_selection_and_attribution(monkeypatch):
+    from app.agent.task_profile import TaskProfile
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "gemini-key", raising=False)
+    monkeypatch.setattr(config, "GROQ_API_KEY", "groq-key", raising=False)
+    monkeypatch.setattr(
+        config, "LLM_PROVIDER_QUALITY",
+        '{"Gemini": 0.1, "Groq": 0.9, "Ollama": 0.0}', raising=False,
+    )
+    providers = []
+
+    def get_client(provider):
+        providers.append(provider)
+        return _FakeClient(_response("ranked provider reply"))
+
+    monkeypatch.setattr(llm, "_client", get_client)
+    profile = TaskProfile(
+        intent="search_web",
+        category="research_current",
+        reasoning_level="high",
+        fresh_information_required=True,
+        required_tools=("search_web",),
+        available_tools=("search_web",),
+        privacy_level="standard",
+        action_risk="none",
+        multi_step_required=False,
+        verification_required=True,
+        context_required=False,
+        required_capabilities=frozenset({"tool_calling"}),
+    )
+
+    with llm.task_profile_scope(profile):
+        result = asyncio.run(llm.chat(
+            [{"role": "user", "content": "Find current information."}],
+            tools=[{"type": "function"}],
+        ))
+
+    assert providers == ["Groq"]
+    assert result["provider"] == "Groq"
+    assert result["text"] == "ranked provider reply"
+
+
+def test_profile_without_a_capable_provider_fails_before_calling_any_provider(monkeypatch):
+    from app.agent.task_profile import TaskProfile
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "gemini-key", raising=False)
+    monkeypatch.setattr(config, "GROQ_API_KEY", "groq-key", raising=False)
+    monkeypatch.setattr(llm, "_PROVIDER_CAPABILITIES", {
+        "Gemini": frozenset({"chat"}),
+        "Groq": frozenset({"chat"}),
+        "Ollama": frozenset({"chat", "local_execution"}),
+    })
+    client_calls = []
+    monkeypatch.setattr(llm, "_client", lambda provider: client_calls.append(provider))
+    profile = TaskProfile(
+        intent="search_web",
+        category="research_current",
+        reasoning_level="high",
+        fresh_information_required=True,
+        required_tools=("search_web",),
+        available_tools=("search_web",),
+        privacy_level="standard",
+        action_risk="none",
+        multi_step_required=False,
+        verification_required=True,
+        context_required=False,
+        required_capabilities=frozenset({"tool_calling"}),
+    )
+
+    with llm.task_profile_scope(profile):
+        with pytest.raises(RuntimeError, match="No configured LLM provider satisfies"):
+            asyncio.run(llm.chat(
+                [{"role": "user", "content": "Find current information."}],
+                tools=[{"type": "function"}],
+            ))
+
+    assert client_calls == []
 
 
 def test_normalize_response_keeps_provider_and_tool_call_shape(monkeypatch):

@@ -476,7 +476,13 @@ register(Tool(
     capabilities=frozenset({"browser"}),
     side_effect=True,
     retry_safe=True,
-    metadata={"direct_routes": {"search_web": {"query": "$request.query"}}, "offline_summary": "do web search and show current results"},
+    metadata={
+        "direct_routes": {"search_web": {"query": "$request.query"}},
+        "offline_summary": "do web search and show current results",
+        "task_capabilities": ["fresh_information", "external_research"],
+        "provider_capabilities": ["fresh_information_workflow"],
+        "dependencies": ["fetch_web_page"],
+    },
 ))
 register(Tool(
     name="fetch_web_page",

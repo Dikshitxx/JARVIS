@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import replace
+from datetime import datetime
 from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -14,7 +16,9 @@ from app.agent.guardrails import prepare_call, validate_call
 from app.agent.prompts import build_system_prompt
 from app.agent.request import build_user_request
 from app.agent.router import _private_safe, capabilities_response, try_fast_route
+from app.agent.task_profile import build_task_profile
 from app.agent.utterance import UtteranceAnalysis, analyze_utterance, relevant_tool_names
+from app.agent.task_profile import workflow_satisfies_profile
 from app.core import config
 from app.llm import llm
 from app.memory import store
@@ -215,6 +219,11 @@ def _is_retryable_tool_failure(name: str, result: ToolResult) -> bool:
     return result.status == "failure" and bool(tool and tool.retry_safe)
 
 
+def _side_effect_key(name: str, args: dict) -> str:
+    normalized = _normalize_pending_arguments(args or {})
+    return name + ":" + json.dumps(normalized, sort_keys=True, default=str)
+
+
 def _chat_supports_tool_choice(func) -> bool:
     try:
         signature = inspect.signature(func)
@@ -376,29 +385,45 @@ class Agent:
         analysis = analyze_utterance(user_text, context, has_pending=has_pending)
         request = build_user_request(user_text, context, analysis)
         analysis = request.analysis or analysis
+        if (
+            request.capabilities & {"information"}
+            and analysis.kind == "conversation"
+            and not analysis.historical_reference
+        ):
+            analysis = replace(analysis, kind="information", information_seeking=True)
+            request = build_user_request(user_text, context, analysis)
         candidate_names = relevant_tool_names(
             user_text, analysis, context, capabilities=request.capabilities,
         )
-        needs_semantic_routing = request.intent != "search_web" and (
-            (analysis.kind == "mixed" and analysis.conversational_clause)
-            or (
-                analysis.kind == "information"
-                and candidate_names is not None
-                and "search_web" in candidate_names
-                and not (candidate_names - {"search_web", "fetch_web_page"})
+        profile_candidates = candidate_names
+        if profile_candidates is None:
+            available_capabilities = (
+                None if (
+                    analysis.temporal_reference and analysis.information_seeking
+                    or request.kind == "INFORMATION_REQUEST"
+                )
+                else request.capabilities
             )
-            or (
-                analysis.kind == "action"
-                and request.intent == "interpret_action"
-                and not request.target
-                and not request.plan
-            )
+            profile_candidates = {
+                name for name, tool in REGISTRY.items()
+                if tool.risk != "blocked"
+                and (
+                    not available_capabilities
+                    or bool(tool.capabilities & available_capabilities)
+                )
+            }
+        if llm.is_private_request():
+            profile_candidates = {
+                name for name in profile_candidates
+                if _private_safe(REGISTRY[name])
+            }
+        task_profile = build_task_profile(
+            request,
+            analysis,
+            context,
+            private=llm.is_private_request(),
+            candidate_tool_names=profile_candidates,
         )
-        if needs_semantic_routing:
-            semantic_flags = _semantic_no_tool_check(user_text, "")
-            if semantic_flags is not None and not semantic_flags[0] and not semantic_flags[2]:
-                analysis = UtteranceAnalysis("conversation")
-                request = build_user_request(user_text, context, analysis)
         context = runtime_context.begin_turn(user_text, analysis)
         try:
             from app.tasks import current_task_id, update_task
@@ -410,7 +435,8 @@ class Agent:
             log.exception("Could not update the current task progress")
         if analysis.kind in {"action", "mixed", "follow_up"}:
             runtime_context.remember_user_entities(user_text)
-        reply = self._respond(user_text, analysis, context, request)
+        with llm.task_profile_scope(task_profile):
+            reply = self._respond(user_text, analysis, context, request)
         if not llm.is_private_request():
             self._record_turn(user_text, reply, analysis.kind)
         with self._lock:
@@ -456,13 +482,22 @@ class Agent:
         if direct_route is not None:
             return self._execute_direct_route(user_text, *direct_route)
 
+        system_prompt = build_system_prompt(
+            user_text,
+            runtime_context.prompt_context(user_text, context, analysis),
+            None,
+        )
+        profile = llm.current_task_profile()
+        if profile is not None and profile.fresh_information_required:
+            current_time = datetime.now().astimezone().isoformat(timespec="minutes")
+            system_prompt += (
+                f"\n\nCurrent local date and time: {current_time}. Preserve the user's "
+                "requested time window in search queries; never replace relative dates "
+                "such as 'this week' with an unrelated fixed year."
+            )
         messages = [{
             "role": "system",
-            "content": build_system_prompt(
-                user_text,
-                runtime_context.prompt_context(user_text, context, analysis),
-                None,
-            ),
+            "content": system_prompt,
         }]
         messages.append({"role": "user", "content": user_text})
         return self._run_tool_loop(user_text, messages, analysis, request=request)
@@ -559,9 +594,15 @@ class Agent:
             })
             if result.status != "success":
                 return result_message
-            return self._run_tool_loop(
-                original_text, messages, continuation["analysis"], initial_results=[result_message],
-            )
+            profile = continuation.get("task_profile")
+            if profile is None:
+                return self._run_tool_loop(
+                    original_text, messages, continuation["analysis"], initial_results=[result_message],
+                )
+            with llm.task_profile_scope(profile):
+                return self._run_tool_loop(
+                    original_text, messages, continuation["analysis"], initial_results=[result_message],
+                )
         return result_message
 
     def _set_pending(
@@ -584,6 +625,7 @@ class Agent:
                 self.pending_continuation = {
                     "user_text": user_text, "messages": list(messages), "analysis": analysis,
                     "private": llm.is_private_request(),
+                    "task_profile": llm.current_task_profile(),
                 }
         runtime_context.update_context(
             pending_operation={
@@ -790,25 +832,40 @@ class Agent:
         *, initial_results: list[str] | None = None, request=None,
     ) -> str:
         completed_results: list[str] = list(initial_results or [])
-        has_web_evidence = False
         request = request or build_user_request(user_text, runtime_context.get_context(), analysis)
         relevant_names = relevant_tool_names(
             user_text, analysis, runtime_context.get_context(), capabilities=request.capabilities,
         )
+        profile = llm.current_task_profile()
+        if profile is not None and relevant_names is not None:
+            relevant_names.update(profile.required_tools)
         if llm.is_private_request():
             private_names = {name for name, tool in REGISTRY.items() if _private_safe(tool)}
             relevant_names = private_names if relevant_names is None else relevant_names & private_names
-        if request.intent == "search_web" and not llm.is_private_request():
-            relevant_names = set(relevant_names or ())
-            relevant_names.add("search_web")
-        if relevant_names is not None and "search_web" in relevant_names:
-            relevant_names = set(relevant_names)
-            relevant_names.add("fetch_web_page")
         schemas = get_schemas(relevant_names=relevant_names)
         allowed_names = {schema["function"]["name"] for schema in schemas}
+        missing_required_tools = (
+            set(profile.required_tools) - allowed_names if profile is not None else set()
+        )
+        missing_tool_workflow = (
+            profile is not None
+            and not workflow_satisfies_profile(profile, allowed_names)
+        )
+        if missing_required_tools or missing_tool_workflow:
+            log.warning(
+                "Required tools are unavailable for task profile category=%s tools=%s workflow=%s",
+                profile.category, sorted(missing_required_tools),
+                sorted(profile.required_tool_capabilities) if missing_tool_workflow else [],
+            )
+            reply = "I can't complete that request with the tools currently available in this privacy context."
+            _mark_current_task("BLOCKED", reply, "Required tool capability unavailable")
+            return reply
         tool_retry_counts: dict[tuple[str, str], int] = {}
         tool_choice_required_used = False
         has_executed_tool = bool(initial_results)
+        completed_tool_names: set[str] = set()
+        completed_side_effects: dict[str, ToolResult] = {}
+        has_required_workflow_evidence = False
         for _ in range(MAX_TOOL_STEPS):
             from app.tasks import cancellation_requested
 
@@ -842,7 +899,32 @@ class Agent:
             if not calls:
                 text_reply = _strip_stray_tool_json(self._message_text(message))
                 if has_executed_tool:
-                    if has_web_evidence:
+                    if (
+                        profile is not None
+                        and profile.required_tool_capabilities
+                        and not has_required_workflow_evidence
+                    ):
+                        provider, _model = _response_attribution(message)
+                        if provider and llm.exclude_provider(provider):
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "The required tool capability has not yet been satisfied. Continue "
+                                    "from the recorded tool results; do not repeat any completed side effect."
+                                ),
+                            })
+                            tool_choice_required_used = True
+                            continue
+                        reply = (
+                            "I made progress, but couldn't verify that the required information was "
+                            "retrieved."
+                        )
+                        _mark_current_task("UNVERIFIED", reply, "Required tool workflow not satisfied")
+                        return reply
+                    if profile is not None and (
+                        profile.multi_step_required
+                        or "external_research" in profile.required_tool_capabilities
+                    ):
                         tool_evidence = "\n".join(
                             str(item.get("content") or "")
                             for item in messages if item.get("role") == "tool"
@@ -850,13 +932,22 @@ class Agent:
                         complete = _semantic_task_completion_check(
                             user_text, text_reply, tool_evidence,
                         )
-                        if complete is False:
+                        if complete is not True:
+                            provider, _model = _response_attribution(message)
+                            if provider and not llm.exclude_provider(provider):
+                                evidence = "\n\n".join(completed_results[-6:])
+                                reply = (
+                                    "I retrieved these results, but couldn't verify that they satisfy every "
+                                    "part of your request:\n\n" + evidence
+                                )
+                                _mark_current_task("UNVERIFIED", reply, "Could not verify all requested deliverables")
+                                return reply
                             if text_reply:
                                 messages.append({"role": "assistant", "content": text_reply})
                             messages.append({
                                 "role": "user",
                                 "content": (
-                                    "The candidate answer does not yet satisfy the full user request. "
+                                    "The candidate answer has not been verified as satisfying the full user request. "
                                     "Continue from the existing tool evidence. Inspect relevant sources "
                                     "or gather any missing information with the available tools; do not "
                                     "present the task as complete until every requested deliverable is "
@@ -867,45 +958,40 @@ class Agent:
                             tool_choice_required_used = True
                             log.info("AGENT_NEXT_STEP reason=requested_deliverables_incomplete")
                             continue
-                        if complete is None:
-                            evidence = "\n\n".join(completed_results[-6:])
-                            reply = (
-                                "I retrieved these results, but couldn't verify that they satisfy every "
-                                "part of your request:\n\n" + evidence
-                            )
-                            return reply
                     return _grounded_tool_summary(user_text, text_reply, messages, completed_results)
                 if analysis.kind == "conversation" and text_reply:
                     return text_reply
-                semantic_flags = _semantic_no_tool_check(user_text, text_reply)
-                if semantic_flags is None:
-                    reply = "I couldn't verify whether an action was requested, so I haven't performed one."
-                    _mark_current_task("BLOCKED", reply, "Could not verify a tool action")
+                requires_tools = profile is not None and "tool_calling" in profile.required_capabilities
+                if requires_tools and not has_executed_tool:
+                    semantic_flags = _semantic_no_tool_check(user_text, text_reply) if text_reply else None
+                    if semantic_flags is not None:
+                        _user_requires_tool, unverified_claim, asked_clarification = semantic_flags
+                        if unverified_claim:
+                            reply = "I couldn't verify that with a tool result, so I haven't done or confirmed it."
+                            _mark_current_task("UNVERIFIED", reply, "Required tool was not executed")
+                            return reply
+                        if asked_clarification:
+                            return text_reply
+                    provider, _model = _response_attribution(message)
+                    if provider and llm.exclude_provider(provider):
+                        if text_reply:
+                            messages.append({"role": "assistant", "content": text_reply})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "This request requires the available tool workflow. Do not answer from "
+                                "memory or claim completion; use the relevant tool and its results."
+                            ),
+                        })
+                        tool_choice_required_used = True
+                        log.info("AGENT_NEXT_STEP reason=required_tool_not_selected provider=%s", provider)
+                        continue
+                    reply = "I couldn't run the required tool, so I can't verify or complete that request."
+                    _mark_current_task("BLOCKED", reply, "Required tool was not executed")
                     return reply
-                requires_tool, unverified_claim, asked_clarification = semantic_flags
-                if unverified_claim:
-                    reply = "I couldn't verify that with a tool result, so I haven't done or confirmed it."
-                    _mark_current_task("BLOCKED", reply, "No tool result confirms the claim")
-                    return reply
-                if asked_clarification and text_reply:
+                if text_reply:
                     return text_reply
-                if not requires_tool and text_reply:
-                    return text_reply
-                if requires_tool and not tool_choice_required_used:
-                    tool_choice_required_used = True
-                    try:
-                        message = _chat_call(messages, schemas, required=True)
-                        _mark_current_task_attribution(message)
-                        calls = self._tool_calls(message)
-                    except Exception as exc:
-                        log.warning("Tool-required retry failed: %s", type(exc).__name__)
-                if not calls:
-                    if requires_tool:
-                        reply = "I couldn't run a tool for that."
-                        _mark_current_task("BLOCKED", reply, "No action was executed")
-                        return reply
-                    final_reply = text_reply or "I couldn't form a response. Please try again."
-                    return final_reply
+                return "I couldn't form a response. Please try again."
 
             if calls and tool_choice_required_used:
                 tool_choice_required_used = False
@@ -919,6 +1005,9 @@ class Agent:
                 reply = "I couldn't match that action to an available capability. Please clarify what you want me to do."
                 _mark_current_task("BLOCKED", reply, "Capability or target needs clarification")
                 return reply
+
+            llm.refine_current_task_profile({name for name, _args in calls})
+            profile = llm.current_task_profile()
 
             try:
                 from app.tasks import current_task_id, update_task
@@ -947,10 +1036,26 @@ class Agent:
                 log.exception("Could not record the model-selected tool call")
 
             model_returned_multiple = len(calls) > 1
-            executable_calls = calls if self._can_run_parallel(calls, user_text) else calls[:1]
+            selected_indices = (
+                list(range(len(calls))) if self._can_run_parallel(calls, user_text) else [0]
+            )
+            executable_calls = [calls[index] for index in selected_indices]
             tool_call_ids = self._append_assistant_tool_calls(messages, message, executable_calls)
-
-            outcomes, confirmation = self._execute_calls(executable_calls, user_text)
+            cached_outcomes: dict[int, tuple[str, dict, ToolResult]] = {}
+            uncached_calls: list[tuple[str, dict]] = []
+            uncached_indices: list[int] = []
+            for index, (name, args) in zip(selected_indices, executable_calls):
+                key = _side_effect_key(name, args)
+                previous = completed_side_effects.get(key) if REGISTRY[name].side_effect else None
+                if previous is not None:
+                    cached_outcomes[index] = (name, args, previous)
+                else:
+                    uncached_calls.append((name, args))
+                    uncached_indices.append(index)
+            executed_outcomes, confirmation = (
+                self._execute_calls(uncached_calls, user_text)
+                if uncached_calls else ([], None)
+            )
             if confirmation is not None:
                 if not self._set_pending(
                     confirmation.tool_name, confirmation.tool_args, messages,
@@ -958,6 +1063,9 @@ class Agent:
                 ):
                     return "Another action is still waiting for confirmation. Confirm or cancel it before starting another protected action."
                 return _confirmation_message(confirmation.tool_name, confirmation.tool_args)
+            for index, outcome in zip(uncached_indices, executed_outcomes):
+                cached_outcomes[index] = outcome
+            outcomes = [cached_outcomes[index] for index in selected_indices if index in cached_outcomes]
             if not outcomes:
                 return "I couldn't complete that request."
 
@@ -966,6 +1074,8 @@ class Agent:
                 log.info("TOOL_RESULT name=%s status=%s verification=%s", name, result.status, result.verification_status)
                 runtime_context.record_action(name, args, result)
                 self._track_tool_state(name, args, result)
+                if result.status == "success" and REGISTRY[name].side_effect:
+                    completed_side_effects[_side_effect_key(name, args)] = result
                 observation = _tool_observation(result)
                 messages.append({
                     "role": "tool",
@@ -973,11 +1083,15 @@ class Agent:
                     "tool_call_id": tool_call_ids[call_index],
                 })
                 has_executed_tool = True
+                if result.status == "success":
+                    completed_tool_names.add(name)
+                    if profile is not None:
+                        has_required_workflow_evidence = workflow_satisfies_profile(
+                            profile, completed_tool_names,
+                        )
                 log.info("TOOL_OBSERVATION name=%s bytes=%s", name, len(observation))
                 if result.status == "success":
                     completed_results.append(result.message)
-                    if name == "search_web":
-                        has_web_evidence = True
                     continue
 
                 retry_key = (name, json.dumps(_normalize_pending_arguments(args or {}), sort_keys=True, default=str))
@@ -1001,6 +1115,8 @@ class Agent:
                     result = retry_result
                     runtime_context.record_action(name, args, result)
                     self._track_tool_state(name, args, result)
+                    if result.status == "success" and REGISTRY[name].side_effect:
+                        completed_side_effects[_side_effect_key(name, args)] = result
                     observation = _tool_observation(result)
                     messages.append({
                         "role": "tool",
@@ -1009,17 +1125,24 @@ class Agent:
                     })
                     if result.status == "success":
                         completed_results.append(result.message)
-                        if name == "search_web":
-                            has_web_evidence = True
+                        completed_tool_names.add(name)
+                        if profile is not None:
+                            has_required_workflow_evidence = workflow_satisfies_profile(
+                                profile, completed_tool_names,
+                            )
                         continue
                 if result.status == "success":
                     continue
                 failures.append(result)
 
             if failures:
-                if any(name == "search_web" for name, _args, _result in outcomes) and not has_web_evidence:
+                if (
+                    profile is not None
+                    and profile.fresh_information_required
+                    and not has_required_workflow_evidence
+                ):
                     reply = failures[0].message
-                    _mark_current_task("FAILED", reply, "Web search did not retrieve evidence")
+                    _mark_current_task("FAILED", reply, "Current-information tool did not retrieve evidence")
                     return reply
                 if any(name == "look_at_screen" for name, _args, _result in outcomes):
                     reply = failures[0].message
@@ -1029,8 +1152,11 @@ class Agent:
                     reply = failures[0].message
                     _mark_current_task("FAILED", reply, "YouTube playback failed")
                     return reply
-                if has_web_evidence and all(name == "fetch_web_page" for name, _args, result in outcomes if result.status != "success"):
-                    log.info("AGENT_NEXT_STEP reason=page_fetch_failed_using_existing_search_evidence")
+                if has_required_workflow_evidence and all(
+                    result.status != "success"
+                    for _name, _args, result in outcomes
+                ):
+                    log.info("AGENT_NEXT_STEP reason=tool_followup_failed_using_existing_evidence")
                     continue
                 _mark_current_task("FAILED", failures[0].message, "Tool operation failed")
                 return failures[0].message

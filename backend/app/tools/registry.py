@@ -151,6 +151,26 @@ def register(tool: Tool) -> None:
     REGISTRY[tool.name] = tool
 
 
+def expand_tool_dependencies(names: set[str]) -> set[str]:
+    """Include registered tool dependencies declared in registry metadata."""
+    expanded = set(names)
+    pending = list(names)
+    while pending:
+        name = pending.pop()
+        tool = REGISTRY.get(name)
+        if tool is None:
+            continue
+        dependencies = tool.metadata.get("dependencies", ())
+        for dependency in dependencies:
+            if dependency not in REGISTRY:
+                log.warning("Tool %s declares unavailable dependency %s", name, dependency)
+                continue
+            if dependency not in expanded:
+                expanded.add(dependency)
+                pending.append(dependency)
+    return expanded
+
+
 CORE_TOOL_NAMES = {"remember_fact", "list_memories", "forget_memory", "get_time"}
 
 
@@ -161,6 +181,7 @@ def get_schemas(
 ) -> list[dict]:
     tools = REGISTRY.values()
     if relevant_names is not None:
+        relevant_names = expand_tool_dependencies(relevant_names)
         tools = [t for t in tools if t.name in relevant_names or (include_core and t.name in CORE_TOOL_NAMES)]
     if capabilities is not None:
         allowed = set(capabilities)

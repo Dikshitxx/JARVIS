@@ -169,14 +169,6 @@ _NEWS_REQUEST_RE = re.compile(
     r"(?:\s+(?:about|on)\s+(.+?))?(?:\s+(?:today|now|right\s+now))?$",
     re.I,
 )
-_CURRENT_FACT_LOOKUP_RE = re.compile(
-    r"^(?:(?:can|could)\s+you\s+|please\s+)?(?:check|find\s+out|look\s+up)\s+(.+)$",
-    re.I,
-)
-_CURRENT_FACT_HINT_RE = re.compile(
-    r"\b(?:current(?:ly)?|latest|recent|today|right\s+now|this\s+year|this\s+month)\b",
-    re.I,
-)
 _COPY_APPLICATION_TEXT_RE = re.compile(
     r"^(?:copy|read)\s+(?:all\s+)?(?:the\s+)?(?:text|contents?)\s+(?:written\s+)?(?:in|from)\s+(.+)$",
     re.I,
@@ -537,17 +529,6 @@ def _parse_one(
             query=query, entities=(Entity("query", query),), capabilities=frozenset({"browser"}),
             analysis_override=info_analysis,
         )
-
-    current_lookup = _CURRENT_FACT_LOOKUP_RE.fullmatch(normalized)
-    if current_lookup and _CURRENT_FACT_HINT_RE.search(current_lookup.group(1)):
-        query = _search_query(current_lookup.group(1))
-        if query and not re.search(r"\bweather\b", query, re.I):
-            info_analysis = replace(analysis, kind="information", has_action=False, refers_to_context=False)
-            return _base(
-                raw, normalized, info_analysis, kind="INFORMATION_REQUEST", intent="search_web",
-                query=query, entities=(Entity("query", query),), capabilities=frozenset({"browser"}),
-                analysis_override=info_analysis,
-            )
 
     if analysis.refers_to_context and re.match(r"^(?:search|find|look up)\b", normalized, re.I):
         from app.agent.runtime_context import contextual_browser_intent

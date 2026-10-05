@@ -135,14 +135,14 @@ def test_weather_location_transcript_falls_back_to_search_without_weather_tool(i
     ))
 
     try:
-        first = Agent().respond("weather in kathmandu")
+        first = Agent().respond("current weather in kathmandu")
         second = Agent().respond("kathmandu")
     finally:
         if weather_tool is not None:
             REGISTRY["get_weather"] = weather_tool
 
-    assert calls == ["weather in kathmandu", "kathmandu"]
-    assert "weather in kathmandu" in first
+    assert calls == ["current weather in kathmandu", "kathmandu"]
+    assert "current weather in kathmandu" in first
     assert "kathmandu" in second
 
 

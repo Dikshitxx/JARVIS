@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-3.8-flash"
     GROQ_MODEL: str = "openai/gpt-oss-120b"
+    LLM_PROVIDER_QUALITY: str = "{}"
+    LLM_PROVIDER_COST: str = "{}"
     ASSISTANT_NAME: str = "Jarvis"
     OWNER_NAME: str = "Boss"
     API_SECRET: str = ""
@@ -66,6 +68,8 @@ GEMINI_API_KEY = settings.GEMINI_API_KEY
 GROQ_API_KEY = settings.GROQ_API_KEY
 GEMINI_MODEL = settings.GEMINI_MODEL
 GROQ_MODEL = settings.GROQ_MODEL
+LLM_PROVIDER_QUALITY = settings.LLM_PROVIDER_QUALITY
+LLM_PROVIDER_COST = settings.LLM_PROVIDER_COST
 ASSISTANT_NAME = settings.ASSISTANT_NAME
 OWNER_NAME = settings.OWNER_NAME
 API_SECRET = settings.API_SECRET

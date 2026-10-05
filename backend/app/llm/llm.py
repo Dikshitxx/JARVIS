@@ -1,5 +1,7 @@
 """Async OpenAI-compatible chat providers with a local Ollama fallback."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 from contextlib import contextmanager
@@ -11,10 +13,15 @@ import mimetypes
 from pathlib import Path
 import threading
 import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
 from app.core import config
+
+if TYPE_CHECKING:
+    from app.agent.task_profile import TaskProfile
 
 log = logging.getLogger("jarvis.llm.providers")
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -24,8 +31,173 @@ GROQ_TIMEOUT_SECONDS = 15
 OLLAMA_TIMEOUT_SECONDS = 120
 _CLIENTS: dict[tuple[str, str, int], AsyncOpenAI] = {}
 _PRIVATE_REQUEST: ContextVar[bool] = ContextVar("jarvis_private_request", default=False)
+_TASK_SELECTION: ContextVar["TaskSelection | None"] = ContextVar("jarvis_task_selection", default=None)
 _BACKGROUND_LOOP: asyncio.AbstractEventLoop | None = None
 _BACKGROUND_LOOP_LOCK = threading.Lock()
+_PROVIDER_METRICS: dict[str, dict[str, float]] = {}
+_PROVIDER_METRICS_LOCK = threading.Lock()
+
+_PROVIDER_CAPABILITIES = {
+    "Gemini": frozenset({
+        "chat", "tool_calling", "remote", "reasoning", "long_context",
+        "fresh_information_workflow",
+    }),
+    "Groq": frozenset({
+        "chat", "tool_calling", "remote", "reasoning",
+        "fresh_information_workflow",
+    }),
+    "Ollama": frozenset({"chat", "tool_calling", "local_execution"}),
+}
+_PROVIDER_ORDER = ("Gemini", "Groq", "Ollama")
+
+
+@dataclass
+class TaskSelection:
+    profile: TaskProfile
+    excluded_providers: set[str] = field(default_factory=set)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@contextmanager
+def task_profile_scope(profile: TaskProfile):
+    selection = TaskSelection(profile)
+    token = _TASK_SELECTION.set(selection)
+    try:
+        yield selection
+    finally:
+        _TASK_SELECTION.reset(token)
+
+
+def current_task_profile() -> TaskProfile | None:
+    selection = _TASK_SELECTION.get()
+    return selection.profile if selection is not None else None
+
+
+def refine_current_task_profile(selected_tools: set[str]) -> None:
+    """Refine the active descriptive profile after tool selection."""
+    selection = _TASK_SELECTION.get()
+    if selection is None:
+        return
+    from app.agent.task_profile import refine_task_profile
+
+    with selection.lock:
+        selection.profile = refine_task_profile(selection.profile, selected_tools)
+
+
+def exclude_provider(provider: str) -> bool:
+    """Exclude an inadequate model from subsequent calls in the active task."""
+    selection = _TASK_SELECTION.get()
+    if selection is None or provider not in _PROVIDER_CAPABILITIES:
+        return False
+    with selection.lock:
+        selection.excluded_providers.add(provider)
+        excluded = set(selection.excluded_providers)
+    return bool(_select_capable_providers(selection.profile, "smart", False, excluded))
+
+
+def _configured_scores(setting_name: str) -> dict[str, float]:
+    raw = getattr(config, setting_name, "{}")
+    try:
+        value = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        log.warning("Ignoring invalid %s provider score configuration", setting_name)
+        return {}
+    if not isinstance(value, dict):
+        log.warning("Ignoring non-object %s provider score configuration", setting_name)
+        return {}
+    scores = {}
+    for provider, score in value.items():
+        if provider in _PROVIDER_CAPABILITIES and isinstance(score, (int, float)) and 0 <= score <= 1:
+            scores[provider] = float(score)
+        else:
+            log.warning("Ignoring invalid %s score for provider %s", setting_name, provider)
+    return scores
+
+
+def _provider_score(
+    provider: str,
+    profile: TaskProfile,
+    quality_scores: dict[str, float],
+    cost_scores: dict[str, float],
+) -> float:
+    quality = quality_scores.get(provider, 0.5)
+    cost = cost_scores.get(provider, 0.5)
+    with _PROVIDER_METRICS_LOCK:
+        metrics = dict(_PROVIDER_METRICS.get(provider, {}))
+    samples = metrics.get("samples", 0.0)
+    health = (metrics.get("successes", 0.0) / samples) if samples else 0.5
+    latency = metrics.get("latency_ms")
+    latency_score = 0.5 if latency is None else 1 / (1 + max(0.0, latency) / 1000)
+    local_score = 1.0 if "local_execution" in _PROVIDER_CAPABILITIES[provider] else 0.0
+
+    reasoning_weight = {"low": 0.2, "medium": 0.7, "high": 1.5}.get(
+        getattr(profile, "reasoning_level", "low"), 0.5,
+    )
+    privacy_weight = 1.0 if getattr(profile, "privacy_level", "standard") == "private" else 0.0
+    latency_weight = 0.25
+    health_weight = 0.5
+    cost_weight = 0.25
+    return (
+        quality * reasoning_weight
+        + local_score * privacy_weight
+        + latency_score * latency_weight
+        + health * health_weight
+        + (1 - cost) * cost_weight
+    )
+
+
+def _provider_healthy(provider: str) -> bool:
+    with _PROVIDER_METRICS_LOCK:
+        metrics = dict(_PROVIDER_METRICS.get(provider, {}))
+    failures = metrics.get("consecutive_failures", 0.0)
+    failed_at = metrics.get("failed_at", 0.0)
+    return failures < 2 or time.monotonic() - failed_at >= 30
+
+
+def _select_capable_providers(
+    profile: TaskProfile, tier: str, private: bool, excluded: set[str],
+) -> list[str]:
+    required = set(getattr(profile, "required_capabilities", ()))
+    if private or getattr(profile, "privacy_level", "standard") == "private":
+        required.add("local_execution")
+    if tier == "local":
+        required.add("local_execution")
+    if getattr(profile, "reasoning_level", "low") == "high":
+        required.add("reasoning")
+    settings = _provider_settings()
+    candidates = [
+        provider for provider in _PROVIDER_ORDER
+        if provider not in excluded
+        and (provider == "Ollama" or bool(settings[provider][1]))
+        and _provider_healthy(provider)
+        and required.issubset(_PROVIDER_CAPABILITIES[provider])
+    ]
+    quality_scores = _configured_scores("LLM_PROVIDER_QUALITY")
+    cost_scores = _configured_scores("LLM_PROVIDER_COST")
+    return sorted(
+        candidates,
+        key=lambda provider: (
+            -_provider_score(provider, profile, quality_scores, cost_scores),
+            _PROVIDER_ORDER.index(provider),
+        ),
+    )
+
+
+def _record_provider_result(provider: str, elapsed_ms: float, success: bool) -> None:
+    with _PROVIDER_METRICS_LOCK:
+        metrics = _PROVIDER_METRICS.setdefault(provider, {
+            "samples": 0.0, "successes": 0.0, "latency_ms": elapsed_ms,
+            "consecutive_failures": 0.0, "failed_at": 0.0,
+        })
+        metrics["samples"] += 1
+        metrics["successes"] += 1 if success else 0
+        if success:
+            metrics["consecutive_failures"] = 0.0
+            previous = metrics.get("latency_ms", elapsed_ms)
+            metrics["latency_ms"] = previous * 0.75 + elapsed_ms * 0.25
+        else:
+            metrics["consecutive_failures"] = metrics.get("consecutive_failures", 0.0) + 1
+            metrics["failed_at"] = time.monotonic()
 
 
 @contextmanager
@@ -218,6 +390,7 @@ async def chat(
     image_path: str | None = None,
     tier: str = "smart",
     tool_choice=None,
+    _selection: TaskSelection | None = None,
 ) -> dict:
     """Call Gemini, Groq, then Ollama and return normalized text/tool calls.
 
@@ -257,7 +430,16 @@ async def chat(
             log.warning("LLM provider Ollama vision failed: %s", errors[-1])
         raise RuntimeError("All vision providers failed. " + "; ".join(errors))
 
-    order = ("Ollama",) if private or tier_name == "local" else ("Gemini", "Groq", "Ollama")
+    active_selection = _selection or _TASK_SELECTION.get()
+    profile = active_selection.profile if active_selection is not None else None
+    if profile is None:
+        order = ("Ollama",) if private or tier_name == "local" else _PROVIDER_ORDER
+    else:
+        with active_selection.lock:
+            excluded = set(active_selection.excluded_providers)
+        order = tuple(_select_capable_providers(profile, tier_name, bool(private), excluded))
+        if not order:
+            raise RuntimeError("No configured LLM provider satisfies this task's required capabilities.")
     errors = []
     for provider in order:
         _base_url, api_key, model, _timeout = settings[provider]
@@ -296,6 +478,7 @@ async def chat(
             if response is None:
                 raise RuntimeError(f"No response received from {provider}")
             elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
+            _record_provider_result(provider, elapsed_ms, True)
             normalized = _normalize_response(response, provider, model)
             usage = getattr(response, "usage", None)
             usage_summary = {}
@@ -308,6 +491,7 @@ async def chat(
             log.info("LLM_CALL provider=%s tier=%s latency_ms=%s tokens=%s", provider, tier_name, elapsed_ms, usage_summary or "n/a")
             return normalized
         except Exception as exc:
+            _record_provider_result(provider, 0.0, False)
             errors.append(f"{provider}: {_safe_error(exc)}")
             log.warning("LLM provider %s failed: %s", provider, errors[-1])
     raise RuntimeError("All configured LLM providers failed. " + "; ".join(errors))
@@ -325,6 +509,7 @@ def chat_sync(
     """Bridge the async provider API for the current synchronous agent worker."""
     if private is None:
         private = is_private_request()
+    selection = _TASK_SELECTION.get()
     loop = _ensure_background_loop()
     result = chat(
         messages,
@@ -334,6 +519,7 @@ def chat_sync(
         image_path=image_path,
         tier=tier,
         tool_choice=tool_choice,
+        _selection=selection,
     )
     future = asyncio.run_coroutine_threadsafe(result, loop)
     try:

@@ -6,8 +6,10 @@ import pytest
 from app.agent import agent as agent_module
 from app.agent.agent import Agent
 from app.agent import runtime_context
+from app.agent.utterance import UtteranceAnalysis
 from app.tools import registry
-from app.tools.registry import REGISTRY, ToolResult
+from app.agent.task_profile import TaskProfile
+from app.tools.registry import REGISTRY, Tool, ToolResult
 
 
 def _tool_call(name, arguments):
@@ -154,7 +156,7 @@ def test_personal_current_context_stays_conversational(monkeypatch):
 
     assert "here to talk" in reply
     assert search_calls == []
-    assert seen_tools == [[], []]
+    assert seen_tools == [[]]
 
 
 @pytest.mark.parametrize(
@@ -360,17 +362,17 @@ def test_tool_result_round_trip_preserves_call_id_for_provider_shapes(monkeypatc
     call_id = f"{shape}-call"
     if shape == "normalized":
         response = {"provider": "Gemini", "text": "", "tool_calls": [{
-            "id": call_id, "name": "search_web", "arguments": {"query": "weather"},
+            "id": call_id, "name": "search_web", "arguments": {"query": "latest election result"},
         }]}
     elif shape == "function_dict":
         response = {"content": "", "tool_calls": [{
             "id": call_id,
-            "function": {"name": "search_web", "arguments": '{"query":"weather"}'},
+            "function": {"name": "search_web", "arguments": '{"query":"latest election result"}'},
         }]}
     else:
         response = SimpleNamespace(content="", tool_calls=[SimpleNamespace(
             id=call_id,
-            function=SimpleNamespace(name="search_web", arguments='{"query":"weather"}'),
+            function=SimpleNamespace(name="search_web", arguments='{"query":"latest election result"}'),
         )])
     responses = [response]
 
@@ -389,13 +391,13 @@ def test_tool_result_round_trip_preserves_call_id_for_provider_shapes(monkeypatc
         )
         tool_result = next(item for item in reversed(messages) if item.get("role") == "tool")
         assert assistant_call["id"] == tool_result["tool_call_id"] == call_id
-        assert json.loads(assistant_call["function"]["arguments"]) == {"query": "weather"}
+        assert json.loads(assistant_call["function"]["arguments"]) == {"query": "latest election result"}
         assert json.loads(tool_result["content"])["status"] == "success"
-        return SimpleNamespace(content="The source reports the weather.", tool_calls=[])
+        return SimpleNamespace(content="The source reports the election result.", tool_calls=[])
 
     monkeypatch.setattr(agent_module.client, "chat", fake_chat)
 
-    assert "reports the weather" in Agent().respond("Can you check the current weather?")
+    assert "reports the election result" in Agent().respond("Can you check the latest election result?")
 
 
 def test_tool_retry_on_failure_then_success(monkeypatch):
@@ -470,9 +472,150 @@ def test_text_only_search_reply_is_rejected_as_honest_tool_error(monkeypatch):
 
     reply = Agent().respond("search the latest weather")
 
-    assert reply == "I couldn't run a tool for that."
-    assert attempts == [None, None, "required"]
+    assert reply == "I couldn't run the required tool, so I can't verify or complete that request."
+    assert attempts == [None, None]
     assert task_updates[-1][0] == "BLOCKED"
+
+
+def test_required_tool_workflow_escalates_without_replaying_search(monkeypatch):
+    context = {"recent_turns": []}
+    _isolate_agent(monkeypatch, context)
+    monkeypatch.setattr(agent_module, "try_fast_route", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_module.config, "GEMINI_API_KEY", "gemini", raising=False)
+    monkeypatch.setattr(agent_module.config, "GROQ_API_KEY", "groq", raising=False)
+    searches = []
+    monkeypatch.setattr(REGISTRY["search_web"], "func", lambda query: searches.append(query) or ToolResult(
+        "success",
+        "Retrieved postings.",
+        data={"query": query, "results": [{
+            "title": "Remote AI Engineer", "url": "https://example.org/jobs/1",
+            "source": "example.org", "snippet": "Requirements include Python and machine learning.",
+        }]},
+        action="search_web",
+        target=query,
+        verification_status="verified",
+    ))
+    calls = []
+
+    def fake_chat(messages, tools=None, tool_choice=None):
+        calls.append((tools, tool_choice))
+        if tools == []:
+            if "requested_deliverable_complete" in messages[0]["content"]:
+                return _completion_flag(True)
+            return _semantic_flags(False)
+        if not any(message.get("role") == "tool" for message in messages):
+            if len(calls) == 1:
+                return {
+                    "provider": "Gemini", "model": "test-gemini",
+                    "text": "I can't look that up right now.", "tool_calls": [],
+                }
+            assert tool_choice == "required"
+            return {
+                "provider": "Groq", "model": "test-groq", "text": "",
+                "tool_calls": [{
+                    "id": "search-1", "name": "search_web",
+                    "arguments": {"query": "remote AI engineer jobs"},
+                }],
+            }
+        return {
+            "provider": "Groq", "model": "test-groq",
+            "text": "The posting requires Python and machine-learning experience.",
+            "tool_calls": [],
+        }
+
+    monkeypatch.setattr(agent_module.client, "chat", fake_chat)
+
+    reply = Agent().respond("Find current remote AI jobs and summarize requirements.")
+
+    assert len(searches) == 1
+    assert any(choice == "required" for _tools, choice in calls)
+    assert "requires Python" in reply
+
+
+def test_provider_escalation_does_not_replay_completed_side_effect(monkeypatch):
+    context = {"recent_turns": []}
+    _isolate_agent(monkeypatch, context)
+    monkeypatch.setattr(agent_module, "try_fast_route", lambda *_args, **_kwargs: None)
+    effects = []
+    monkeypatch.setitem(REGISTRY, "test_side_effect", Tool(
+        name="test_side_effect",
+        description="Perform a test operation",
+        parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+        func=lambda value: effects.append(value) or ToolResult(
+            "success", "Operation recorded.", verification_status="verified",
+        ),
+        capabilities=frozenset({"test"}),
+        side_effect=True,
+    ))
+    profile = TaskProfile(
+        intent="test_side_effect",
+        category="multi_step_action",
+        reasoning_level="high",
+        fresh_information_required=False,
+        required_tools=("test_side_effect",),
+        available_tools=("test_side_effect",),
+        privacy_level="standard",
+        action_risk="none",
+        multi_step_required=True,
+        verification_required=True,
+        context_required=False,
+        required_capabilities=frozenset({"tool_calling", "reasoning"}),
+    )
+    monkeypatch.setattr(agent_module, "build_task_profile", lambda *_args, **_kwargs: profile)
+    monkeypatch.setattr(agent_module, "relevant_tool_names", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agent_module, "analyze_utterance", lambda *_args, **_kwargs: UtteranceAnalysis(
+        kind="mixed", has_action=True, tool_action=True,
+    ))
+    monkeypatch.setattr(
+        agent_module.llm, "exclude_provider",
+        lambda provider: provider == "Gemini",
+    )
+    calls = []
+    completion_checks = 0
+
+    def fake_chat(messages, tools=None, tool_choice=None):
+        nonlocal completion_checks
+        calls.append((messages, tools, tool_choice))
+        if tools == []:
+            system = messages[0]["content"]
+            if "requested_deliverable_complete" in system:
+                completion_checks += 1
+                return _completion_flag(completion_checks > 1)
+            if "Classify these two messages" in system:
+                return _semantic_flags(False)
+        if not any(message.get("role") == "tool" for message in messages):
+            return {
+                "provider": "Gemini", "model": "test-gemini", "text": "",
+                "tool_calls": [{
+                    "id": "effect-1", "name": "test_side_effect",
+                    "arguments": {"value": "once"},
+                }],
+            }
+        if tool_choice == "required":
+            return {
+                "provider": "Groq", "model": "test-groq", "text": "",
+                "tool_calls": [{
+                    "id": "effect-2", "name": "test_side_effect",
+                    "arguments": {"value": "once"},
+                }],
+            }
+        provider = "Groq" if any(
+            message.get("tool_call_id") == "effect-2" for message in messages
+        ) else "Gemini"
+        return {
+            "provider": provider, "model": f"test-{provider.lower()}",
+            "text": "The requested operation is complete.",
+            "tool_calls": [],
+        }
+
+    monkeypatch.setattr(agent_module.client, "chat", fake_chat)
+
+    reply = Agent().respond("Perform the requested operation and verify every step.")
+
+    assert reply == "The requested operation is complete."
+    assert effects == ["once"]
+    assert completion_checks == 2
+    assert any(choice == "required" for _messages, _tools, choice in calls)
 
 
 def test_required_tool_choice_executes_the_returned_tool(monkeypatch):
@@ -481,19 +624,15 @@ def test_required_tool_choice_executes_the_returned_tool(monkeypatch):
     monkeypatch.setattr(REGISTRY["get_time"], "func", lambda: calls.append("get_time") or ToolResult(
         "success", "4:30 PM", verification_status="verified",
     ))
-    classifications = iter([
-        '{"user_requires_tool":true,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}',
-        '{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}',
-    ])
-
     def fake_chat(messages, tools=None, tool_choice=None):
         if tools == []:
-            return SimpleNamespace(content=next(classifications), tool_calls=[])
+            return SimpleNamespace(
+                content='{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}',
+                tool_calls=[],
+            )
         if any(message.get("role") == "tool" for message in messages):
             return SimpleNamespace(content="It's 4:30 PM.", tool_calls=[])
-        if tool_choice == "required":
-            return SimpleNamespace(content="", tool_calls=[_tool_call("get_time", {})])
-        return SimpleNamespace(content="The current time needs a tool.", tool_calls=[])
+        return SimpleNamespace(content="", tool_calls=[_tool_call("get_time", {})])
 
     monkeypatch.setattr(agent_module.client, "chat", fake_chat)
 
@@ -523,7 +662,7 @@ def test_failed_web_search_never_falls_back_to_a_memory_answer(monkeypatch):
     reply = Agent().respond("Find the latest movie release online")
 
     assert reply == "Search providers are unavailable."
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 def test_natural_language_current_web_request_is_not_stopped_by_keyword_gap(monkeypatch):

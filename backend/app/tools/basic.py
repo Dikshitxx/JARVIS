@@ -82,6 +82,7 @@ register(Tool(
     func=get_time,
     keywords=("time", "date", "day"),
     parallel_safe=True,
+    metadata={"task_capabilities": ["live_state"]},
 ))
 
 register(Tool(
@@ -120,4 +121,9 @@ register(Tool(
     func=get_weather,
     keywords=("weather", "temperature", "forecast", "wind", "humidity"),
     parallel_safe=True,
+    metadata={
+        "direct_information": True,
+        "task_capabilities": ["fresh_information"],
+        "provider_capabilities": ["fresh_information_workflow"],
+    },
 ))

@@ -19,20 +19,21 @@ This document describes the runtime architecture implemented in the repository t
 | --- | --- | --- |
 | `backend/app/api/routes.py` | Health, chat, task, activity, status, and voice endpoints | Calls `TaskManager`, `Agent`, memory, and voice service |
 | `backend/app/tasks.py` | Queue, persistence, cancellation, timeout, lifecycle | Calls `Agent.respond` in task and privacy contexts |
-| `backend/app/agent/agent.py` | Conversation context, tool schemas, model calls, tool loop, result composition | Calls provider interface, permissions, registry, and runtime context |
+| `backend/app/agent/agent.py` | Task-profile construction, conversation context, tool schemas, model calls, tool loop, result composition | Calls provider interface, permissions, registry, and runtime context |
+| `backend/app/agent/task_profile.py` | Provider-independent task capability profile and optional classifier protocol | Uses existing request, privacy, tool, risk, and context signals; classifier is disabled by default |
 | `backend/app/agent/request.py` | Structured intent and context metadata | Refines turn classification; model tool calls own runtime dispatch |
 | `backend/app/agent/utterance.py` | Lightweight English turn-state hints, especially cancellation/confirmation | Used by API/context code; it does not choose the registered tool |
 | `backend/app/agent/privacy.py` | Fixed local-only classification | Runs before model selection in background tasks |
 | `backend/app/permissions/classify.py` | Allow, confirm, or block for a proposed tool call | Invoked inside the registry before tool execution |
 | `backend/app/tools/registry.py` | Tool metadata, schemas, policy gate, retries, task-step recording | Imports tool definitions and calls individual tool functions |
-| `backend/app/llm/llm.py` | Provider order, fallback, private-provider restriction, response normalization | Called by the agent and vision tools |
+| `backend/app/llm/llm.py` | Capability filtering, provider ranking/fallback, private-provider restriction, response normalization | Called by the agent and vision tools |
 | `backend/app/memory/store.py` | SQLite persistence | Stores conversations, actions, tasks, and memory records |
 | `frontend/app/api/backend/[...path]/route.ts` | Same-origin allow-listed HTTP proxy | Keeps the backend secret on the Next.js server |
 | `frontend/components/ChatPanel/ChatPanel.tsx` | Chat input, task polling, cancellation, progress display | Uses `frontend/lib/api.ts` |
 
 ## Model selection versus policy
 
-The model decides what the user means and which available tool best fits the request. The model does not decide privacy, authorization, confirmation, whether a tool actually succeeded, or whether a result is verified. Those decisions stay in Python code and tool results.
+The model interprets natural language and selects among available tools, while a local task profile carries established capability requirements into provider selection. The profile does not use an LLM just to classify the request. The model does not decide privacy, authorization, confirmation, whether a tool actually succeeded, or whether a result is verified. Those decisions stay in Python code and tool results.
 
 The old `router.py` exports no-op compatibility helpers. They never run a tool. `Agent` exposes all non-blocked tool schemas for ordinary turns so its configured model can choose from their descriptions and JSON schemas. A plain-text response is semantically checked when there is no tool call; if the check is invalid or indicates an unverified action claim, the agent fails closed. After a tool runs, a proposed summary is also checked against the recorded tool observations. If that check is unavailable or flags an unsupported claim, JARVIS returns the actual tool result instead of the model's summary.
 
@@ -40,13 +41,15 @@ This is model-based natural-language routing, not a guarantee that every provide
 
 ## Providers and privacy
 
-The provider chain is Gemini, Groq, then local Ollama for non-private calls. Private calls skip cloud providers and use the local provider only. Current defaults are configured in `backend/app/core/config.py` and can be overridden in `backend/.env`:
+For unprofiled direct LLM calls, the provider chain remains Gemini, Groq, then local Ollama. Agent turns first filter providers against the task profile, then rank the remaining configured providers by their optional quality/cost scores and observed health/latency. The normalized score mappings are `LLM_PROVIDER_QUALITY` and `LLM_PROVIDER_COST` in `backend/.env`; absent values are neutral, preserving the established provider order on ties. If a selected provider cannot perform required tool work or the result remains incomplete, the agent excludes it for the current task and continues with another capable provider. Private calls always skip cloud providers and use the local provider only. Current defaults are configured in `backend/app/core/config.py` and can be overridden in `backend/.env`:
 
 - Gemini: `gemini-3.8-flash`.
 - Groq: `openai/gpt-oss-120b`.
 - Ollama: `llama3.2:3b`.
 
 The app can report provider availability at `/llm/status`. A provider model ID being valid does not prove the current key, account, quota, endpoint, or local Ollama service works. Provider status must be checked in the running environment.
+
+`backend/app/agent/task_profile.py` exposes an asset-agnostic `SemanticProfileClassifier` protocol. No semantic model is enabled or bundled: `onnxruntime` alone does not supply the task model's tokenizer or preprocessing pipeline, and no JARVIS classifier asset has been validated. Until a compatible, licensed artifact and its complete preprocessing assets are supplied, deterministic structured signals remain the fallback and unestablished reasoning complexity is left unknown.
 
 The privacy classifier is deterministic and intentionally small. It detects common sensitive labels and structured values; it does not infer arbitrary sensitive meaning in every language. Requests with the explicit private flag always remain local. For environments requiring a stronger guarantee, configure the provider policy to local-only until a reviewed privacy policy is available.
 

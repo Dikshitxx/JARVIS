@@ -218,3 +218,9 @@ __marimo__/
 .streamlit/secrets.toml
 
 data/
+
+# Temporary pytest runs created for local comparisons.
+.pytest-tmp*/
+
+!frontend/lib/
+!frontend/lib/api.ts

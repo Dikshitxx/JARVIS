@@ -87,19 +87,29 @@ def test_live_media_question_is_information_request_with_live_capability():
     ],
 )
 def test_application_and_browser_state_questions_use_live_inspection(monkeypatch, text, intent, tool, capability):
+    from app.agent import agent as agent_module
+
     calls = []
-    monkeypatch.setattr(
-        router, "run_tool_result",
-        lambda name, args: calls.append((name, args)) or ToolResult("success", "live state inspected", verification_status="verified"),
-    )
     request = build_user_request(text)
-    routed = router._route_request(request)
+
+    def fake_chat(_messages, tools=None, **_kwargs):
+        calls.append({schema["function"]["name"] for schema in tools or []})
+        return SimpleNamespace(content="", tool_calls=[SimpleNamespace(function=SimpleNamespace(
+            name=tool, arguments={"name": request.target} if tool == "inspect_application" else {},
+        ))])
+
+    monkeypatch.setattr(agent_module.client, "chat", fake_chat)
+    monkeypatch.setattr(REGISTRY[tool], "func", lambda **_args: ToolResult(
+        "success", "live state inspected", verification_status="verified",
+    ))
+    monkeypatch.setattr(agent_module.runtime_context, "record_action", lambda *_args, **_kwargs: {})
+    reply = Agent().respond(text)
 
     assert request.kind == "INFORMATION_REQUEST"
     assert request.intent == intent
     assert capability in request.capabilities
-    assert routed is not None and routed[0] == tool
-    assert calls[0][0] == tool
+    assert reply == "live state inspected"
+    assert tool in calls[0]
 
 
 def test_chat_cancellation_and_context_references_are_separate():
@@ -128,7 +138,7 @@ def test_media_capability_does_not_expose_messaging_tools():
     assert not any("whatsapp" in name or "message" in name for name in available)
 
 
-def test_paraphrased_open_request_uses_llm_tool_calling_without_objective_parser(monkeypatch):
+def test_paraphrased_open_request_uses_registered_direct_route(monkeypatch):
     seen = []
 
     def fake_chat(messages, tools=None):
@@ -140,20 +150,14 @@ def test_paraphrased_open_request_uses_llm_tool_calling_without_objective_parser
             })()})()],
         })()
 
-    def fake_fast_route(*args, **kwargs):
-        return None
-
     monkeypatch.setattr("app.agent.agent.client.chat", fake_chat)
-    monkeypatch.setattr("app.agent.agent.try_fast_route", fake_fast_route)
     monkeypatch.setattr(REGISTRY["browser_open"], "func", lambda target: ToolResult("success", f"Opened {target}.", verification_status="verified"))
     monkeypatch.setattr("app.agent.agent.runtime_context.record_action", lambda *args, **kwargs: {})
 
     reply = Agent().respond("Could you take me to ChatGPT?")
 
     assert reply == "Opened chatgpt."
-    assert len(seen) == 1
-    assert "browser_open" in seen[0]
-    assert "search_web" in seen[0]
+    assert seen == []
 
 
 def test_contextual_reference_requests_do_not_fast_route():
@@ -271,9 +275,12 @@ def test_agent_observes_sequential_llm_tool_calls_without_parser_overrides(monke
         SimpleNamespace(content="", tool_calls=[SimpleNamespace(function=SimpleNamespace(name="open_app", arguments={"name": "Wrong app"}))]),
         SimpleNamespace(content="", tool_calls=[SimpleNamespace(function=SimpleNamespace(name="browser_search", arguments={"target": "github", "query": "wrong query"}))]),
         SimpleNamespace(content="Brave is open and YouTube has the relaxing music search results.", tool_calls=[]),
+        SimpleNamespace(content='{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}', tool_calls=[]),
     ]
 
     def fake_chat(_messages, tools=None):
+        if tools == []:
+            return SimpleNamespace(content='{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}', tool_calls=[])
         exposed.append([item["function"]["name"] for item in (tools or [])])
         return replies.pop(0)
 
@@ -297,41 +304,26 @@ def test_agent_observes_sequential_llm_tool_calls_without_parser_overrides(monke
 
 
 @pytest.mark.parametrize(
-    ("text", "expected_tool", "expected_args"),
+    ("text", "expected"),
     [
-        ("open chat gpt for me", "browser_open", {"target": "chatgpt"}),
-        ("play Hustle 2.0", "play_youtube_song", {"query": "Hustle 2.0", "avoid_current": False}),
-        ("pause the current song", "control_media", {"action": "pause"}),
-        ("what song is currently playing?", "inspect_current_media", {}),
+        ("open chat gpt for me", ("browser_open", {"target": "chatgpt"})),
+        ("play Hustle 2.0", ("play_youtube_song", {"query": "Hustle 2.0"})),
+        ("pause the current song", ("control_media", {"action": "pause"})),
+        ("what song is currently playing?", None),
     ],
 )
-def test_fast_routing_uses_structured_targets(monkeypatch, text, expected_tool, expected_args):
-    calls = []
-
-    def fake_run_tool(name, args):
-        calls.append((name, args))
-        return ToolResult("success", "mock result", verification_status="verified")
-
-    monkeypatch.setattr(router, "run_tool_result", fake_run_tool)
-    request = build_user_request(text)
-    routed = router._route_request(request)
-
-    assert routed is not None
-    assert (routed[0], calls[0][1]) == (expected_tool, expected_args)
+def test_fast_router_uses_only_registered_direct_routes(text, expected):
+    assert router.is_fast_route_candidate(text) is (expected is not None)
+    assert router.try_fast_route(text) == expected
 
 
-def test_news_route_preserves_google_target(monkeypatch):
-    calls = []
+def test_news_metadata_uses_registered_search_route():
+    request = build_user_request("tell me recent news")
 
-    def fake_run_tool(name, args):
-        calls.append((name, args))
-        return ToolResult("success", "opened search", verification_status="verified")
-
-    monkeypatch.setattr(router, "run_tool_result", fake_run_tool)
-    routed = router._route_request(build_user_request("tell me recent news"))
-
-    assert routed is not None
-    assert calls == [("search_web", {"query": "latest news", "target": "google"})]
+    assert request.intent == "search_web"
+    assert router.try_fast_route("tell me recent news", request=request) == (
+        "search_web", {"query": "latest news"},
+    )
 
 
 def test_recent_news_is_search_not_messaging():

@@ -5,8 +5,7 @@ import logging
 from pathlib import Path
 import time
 
-from app.agent.model_swap import vision_model_session
-from app.llm.client import vision_chat
+from app.llm import llm
 from app.tools.registry import Tool, register
 from app.tools.screen import take_screenshot
 
@@ -32,9 +31,12 @@ def look_at_screen(question: str = DEFAULT_QUESTION) -> str:
     log.info("LOOK_AT_SCREEN invoked at=%s question_chars=%d", timestamp, len(question))
     try:
         image_path = _screenshot_path(take_screenshot())
-        with vision_model_session():
-            answer = vision_chat(image_path, question)
-        return answer
+        response = llm.chat_sync(
+            [{"role": "user", "content": question}],
+            vision=True,
+            image_path=image_path,
+        )
+        return response["text"]
     except Exception as exc:
         log.exception("LOOK_AT_SCREEN failed at=%s", timestamp)
         return f"Error: vision request failed: {exc}"

@@ -11,11 +11,13 @@ type ChatItem = {
   status: TaskStatus | "SUBMITTING";
   reply: string;
   currentStep: string;
+  responseProvider?: string;
+  responseModel?: string;
   cancellationRequested?: boolean;
 };
 
 const ACTIVE_STATUSES = new Set<TaskStatus | "SUBMITTING">([
-  "SUBMITTING", "PENDING", "RUNNING", "WAITING_CONFIRMATION", "WAITING_FOR_USER_INPUT",
+  "SUBMITTING", "PENDING", "QUEUED", "RUNNING", "WAITING_CONFIRMATION", "WAITING_FOR_USER_INPUT",
 ]);
 
 function deriveCurrentStep(status: TaskStatus | "SUBMITTING", reply: string): string {
@@ -23,6 +25,7 @@ function deriveCurrentStep(status: TaskStatus | "SUBMITTING", reply: string): st
     case "SUBMITTING":
       return "Submitting request";
     case "PENDING":
+    case "QUEUED":
       return "Queued";
     case "RUNNING":
       return "Working";
@@ -85,10 +88,14 @@ export function ChatPanel({
               ? "Waiting for confirmation"
               : task.current_step || deriveCurrentStep(task.status, task.result || item.reply),
             reply: task.result || item.reply,
+            responseProvider: task.response_provider || item.responseProvider,
+            responseModel: task.response_model || item.responseModel,
             cancellationRequested: task.cancellation_requested,
           };
           if (values.status !== item.status || values.currentStep !== item.currentStep ||
-              values.reply !== item.reply || values.cancellationRequested !== item.cancellationRequested) changed = true;
+              values.reply !== item.reply || values.responseProvider !== item.responseProvider ||
+              values.responseModel !== item.responseModel ||
+              values.cancellationRequested !== item.cancellationRequested) changed = true;
           return values;
         });
         return changed ? next : current;
@@ -130,6 +137,8 @@ export function ChatPanel({
         taskId: result.task_id,
         status: result.status,
         reply: result.reply || "",
+        responseProvider: result.response_provider,
+        responseModel: result.response_model,
         currentStep: deriveCurrentStep(result.status ?? "PENDING", result.reply || ""),
       }));
     } catch (error) {
@@ -152,6 +161,8 @@ export function ChatPanel({
         status: task.status,
         currentStep: task.current_step,
         reply: task.result || entry.reply,
+        responseProvider: task.response_provider || entry.responseProvider,
+        responseModel: task.response_model || entry.responseModel,
         cancellationRequested: task.cancellation_requested,
       }));
     } catch {
@@ -209,7 +220,16 @@ export function ChatPanel({
               {item.status.replaceAll("_", " ")}{item.currentStep ? ` · ${item.currentStep}` : ""}
               {item.cancellationRequested ? " · stopping after current operation" : ""}
             </p>
-            {item.reply && <p className="mt-1 whitespace-pre-wrap">{item.reply}</p>}
+            {item.reply && (
+              <div className="mt-1">
+                <p className="whitespace-pre-wrap">{item.reply}</p>
+                {(item.responseProvider || item.responseModel) && (
+                  <p className="mt-1 text-[11px] text-[var(--muted)]">
+                    via {[item.responseProvider, item.responseModel].filter(Boolean).join(" · ")}
+                  </p>
+                )}
+              </div>
+            )}
             {item.taskId && ACTIVE_STATUSES.has(item.status) && (
               <button
                 type="button"

@@ -1,18 +1,30 @@
 from pathlib import Path
 
+from dotenv import load_dotenv
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+load_dotenv()
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     MODEL_NAME: str = "llama3.2:3b"
+    OLLAMA_MODEL: str = Field(
+        default="llama3.2:3b",
+        validation_alias=AliasChoices("OLLAMA_MODEL", "MODEL_NAME"),
+    )
     VISION_MODEL: str = "moondream"
     OLLAMA_HOST: str = "http://localhost:11434"
     OLLAMA_KEEP_ALIVE: str = "30m"
+    GEMINI_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
     ASSISTANT_NAME: str = "Jarvis"
     OWNER_NAME: str = "Boss"
-    API_SECRET: str = "jarvis-local-dev-secret-change-me"
+    API_SECRET: str = ""
     FRONTEND_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     MAX_HISTORY_MESSAGES: int = 10
@@ -45,10 +57,15 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # Backward-compatible module-level names (existing code imports these directly)
-MODEL_NAME = settings.MODEL_NAME
+MODEL_NAME = settings.OLLAMA_MODEL
+OLLAMA_MODEL = settings.OLLAMA_MODEL
 VISION_MODEL = settings.VISION_MODEL
 OLLAMA_HOST = settings.OLLAMA_HOST
 OLLAMA_KEEP_ALIVE = settings.OLLAMA_KEEP_ALIVE
+GEMINI_API_KEY = settings.GEMINI_API_KEY
+GROQ_API_KEY = settings.GROQ_API_KEY
+GEMINI_MODEL = settings.GEMINI_MODEL
+GROQ_MODEL = settings.GROQ_MODEL
 ASSISTANT_NAME = settings.ASSISTANT_NAME
 OWNER_NAME = settings.OWNER_NAME
 API_SECRET = settings.API_SECRET

@@ -38,7 +38,7 @@ def activate_request(task_id: str) -> dict:
 
 
 @contextmanager
-def request_context_scope(task_id: str, initial: dict):
+def request_context_scope(task_id: str, initial: dict, *, commit: bool = True):
     """Isolate a task's context and commit it only if no newer request took over."""
     local = {**store._RUNTIME_DEFAULTS, **initial}
     token = _request_context.set(local)
@@ -46,7 +46,8 @@ def request_context_scope(task_id: str, initial: dict):
         yield local
     finally:
         _request_context.reset(token)
-        store.commit_runtime_context_if_active(task_id, local)
+        if commit:
+            store.commit_runtime_context_if_active(task_id, local)
 
 
 def _trim(value, limit: int = 500) -> str:
@@ -157,6 +158,8 @@ def record_action(tool_name: str, args: dict, result) -> dict:
     data = getattr(result, "data", None)
     context = get_context()
     safe_args = _json_safe(args or {})
+    if tool_name == "browser_type_text" and (args or {}).get("text"):
+        safe_args["text"] = f"[redacted; {len(str(args['text']))} characters]"
     action = {
         "tool": tool_name,
         "args": safe_args,

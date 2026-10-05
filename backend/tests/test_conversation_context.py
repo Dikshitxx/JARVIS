@@ -84,24 +84,23 @@ def test_conversation_action_conversation_flow(monkeypatch):
 
     agent = Agent()
     seen_tools = []
-    monkeypatch.setattr(
-        agent_module.client,
-        "chat",
-        lambda _messages, tools=None: (seen_tools.append(tools) or SimpleNamespace(content="I'm doing well.", tool_calls=[])),
-    )
-    monkeypatch.setattr(
-        agent_module,
-        "try_fast_route",
-        lambda text, _context, _request=None: ("open_app", ToolResult("success", "Opened Brave."), {"name": "Brave"})
-        if text == "Open Brave" else None,
-    )
+    def fake_chat(messages, tools=None, **_kwargs):
+        if messages[-1].get("content", "").startswith("USER MESSAGE:"):
+            return SimpleNamespace(content='{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}', tool_calls=[])
+        seen_tools.append(tools)
+        return SimpleNamespace(content="I'm doing well.", tool_calls=[])
+
+    monkeypatch.setattr(agent_module.client, "chat", fake_chat)
+    monkeypatch.setattr(agent_module, "run_tool_result", lambda name, args, **_kwargs: ToolResult(
+        "success", "Opened Brave.", verification_status="verified",
+    ))
     monkeypatch.setattr(runtime_context, "record_action", lambda *_args, **_kwargs: {})
 
     assert agent.respond("How are you?") == "I'm doing well."
     assert agent.respond("Open Brave") == "Opened Brave."
     assert agent.respond("By the way, how are you doing?") == "I'm doing well."
     assert len(seen_tools) == 2
-    assert all("search_web" in {item["function"]["name"] for item in tools} for tools in seen_tools)
+    assert all(tools == [] for tools in seen_tools)
 
 
 def test_follow_up_keeps_the_same_task_and_prior_result():

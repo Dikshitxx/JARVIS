@@ -51,6 +51,7 @@ def test_vision_chat_uses_ollama_image_message_and_configured_model(monkeypatch,
 
 
 def test_screen_tool_swaps_models_around_failed_inference(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "", raising=False)
     image_path = tmp_path / "screen.png"
     image_path.write_bytes(b"test image")
     events = []
@@ -83,11 +84,17 @@ def test_screen_tool_swaps_models_around_failed_inference(monkeypatch, tmp_path)
     ]
 
 
-def test_guardrail_blocks_nonvisual_message():
-    reason = validate_call("look_at_screen", {}, "what time is it")
+def test_tool_validation_does_not_use_english_phrases_to_gate_visual_intent():
+    assert validate_call("look_at_screen", {}, "¿Qué aparece en mi pantalla?") is None
 
-    assert reason is not None
-    assert "not ask about visible content" in reason
+
+def test_short_non_english_vision_question_is_preserved():
+    question = "¿Qué es esto?"
+
+    assert vision.look_at_screen.__name__ == "look_at_screen"
+    from app.agent.guardrails import prepare_call
+
+    assert prepare_call("look_at_screen", {"question": question}) == {"question": question}
 
 
 def test_main_model_load_is_attempted_when_vision_unload_fails(monkeypatch):

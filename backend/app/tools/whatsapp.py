@@ -20,4 +20,7 @@ register(Tool(
     },
     func=send_whatsapp_message,
     risk="confirm",
+    metadata={"direct_routes": {"send_whatsapp_message": {
+        "contact": "$request.target", "message": "$request.query",
+    }}, "offline_summary": "prepare and send an explicitly requested WhatsApp message after confirmation"},
 ))

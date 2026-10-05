@@ -5,7 +5,7 @@ from app.tools.registry import ToolResult
 from app.tools.web_search import HttpWebSearchProvider
 
 
-def test_http_search_provider_combines_and_deduplicates_sources(monkeypatch):
+def test_http_search_provider_combines_and_deduplicates_sources(monkeypatch, caplog):
     duckduckgo = """
     <div class="result"><a class="result__a" href="https://example.org/a">First source</a>
     <a class="result__snippet">Evidence from provider one.</a></div>
@@ -17,11 +17,13 @@ def test_http_search_provider_combines_and_deduplicates_sources(monkeypatch):
     provider = HttpWebSearchProvider("auto")
     monkeypatch.setattr(provider, "_get_html", lambda name, _query: duckduckgo if name == "duckduckgo" else bing)
 
-    results = provider.search("latest movie")
+    with caplog.at_level("INFO", logger="jarvis.web_search"):
+        results = provider.search("latest movie")
 
     assert {result["url"] for result in results} == {"https://example.org/a", "https://other.example/b"}
     assert {result["provider"] for result in results} == {"duckduckgo", "bing"}
     assert all(result["title"] and result["snippet"] and result["source"] for result in results)
+    assert "latest movie" not in caplog.text
 
 
 def test_extract_content_omits_scripts_and_bounds_page_text(monkeypatch):

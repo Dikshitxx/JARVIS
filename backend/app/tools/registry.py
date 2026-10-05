@@ -248,7 +248,7 @@ def _safe_arguments(args: dict) -> dict:
 
 _CONTENT_TOOLS = {
     "read_clipboard", "copy_selection", "copy_application_text", "copy_from_window", "read_text_file",
-    "send_whatsapp_message", "type_text", "copy_text",
+    "send_whatsapp_message", "type_text", "browser_type_text", "copy_text",
 }
 
 

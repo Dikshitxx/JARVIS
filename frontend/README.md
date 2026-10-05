@@ -1,36 +1,33 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# frontend
 
-## Getting Started
+## Purpose
 
-First, run the development server:
+Next.js 14 browser interface and server-side API proxy.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Files
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- `.env.example` - Blank template for server-only `JARVIS_API_BASE` and `JARVIS_API_SECRET` proxy settings.
+- `.eslintrc.json` - Frontend lint settings.
+- `.gitignore` - Frontend generated output exclusions.
+- `next-env.d.ts` - Next.js TypeScript declarations.
+- `next.config.mjs` - Next.js build/runtime configuration.
+- `package-lock.json` - Pinned npm dependency graph.
+- `package.json` - Next.js scripts and React/Three.js dependencies.
+- `postcss.config.mjs` - PostCSS/Tailwind processing.
+- `tailwind.config.ts` - Tailwind content and theme configuration.
+- `tsconfig.json` - TypeScript compiler configuration.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Child folders
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `app/` - See [app/README.md](./app/README.md).
+- `components/` - See [components/README.md](./components/README.md).
+- `lib/` - See [lib/README.md](./lib/README.md).
+- `public/` - See [public/README.md](./public/README.md).
 
-## Learn More
+## Execution and connections
 
-To learn more about Next.js, take a look at the following resources:
+Install with npm install; start with npm run dev; build with npm run build.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+App Router page -> components -> typed clients in lib -> same-origin API proxy -> FastAPI.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See the [architecture guide](../docs/architecture.md) for the end-to-end flow and [folder map](../docs/folder-map.md) for repository-wide navigation.

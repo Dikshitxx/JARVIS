@@ -239,10 +239,14 @@ class HttpWebSearchProvider(WebSearchProvider):
             except Exception as exc:
                 failures.append(str(exc))
 
+        gathered.sort(key=lambda item: providers.index(item[0]))
         results = []
         seen_urls = set()
         for provider_name, provider_results in gathered:
-            log.info("SEARCH_RESULTS_RECEIVED provider=%s query=%r count=%s", provider_name, query, len(provider_results))
+            log.info(
+                "SEARCH_RESULTS_RECEIVED provider=%s query_chars=%s count=%s",
+                provider_name, len(query), len(provider_results),
+            )
             for item in provider_results:
                 normalized_url = item["url"].rstrip("/").casefold()
                 if normalized_url and normalized_url not in seen_urls:

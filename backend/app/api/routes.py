@@ -9,6 +9,7 @@ from app.voice import voice_service
 from app.tasks import TaskCapacityError, normalize_task_status, task_manager
 from app.agent.utterance import analyze_utterance
 from app.agent import runtime_context
+from app.llm.llm import provider_status
 
 router = APIRouter()
 
@@ -16,11 +17,17 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     message: str
     background: bool = False
+    private: bool = False
 
 
 @router.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@router.get("/llm/status")
+async def llm_status():
+    return await provider_status()
 
 
 @router.get("/status")
@@ -59,17 +66,24 @@ def chat(req: ChatRequest):
                 "reply": "Cancellation requested. JARVIS will stop after the current operation finishes.",
             }
     try:
+        private = bool(getattr(req, "private", False))
         if req.background:
-            task_id = task_manager.submit(req.message)
+            task_id = task_manager.submit(req.message, private=private)
             return {
                 "task_id": task_id,
                 "status": "QUEUED",
                 "reply": "I’m working on that in the background.",
             }
-        task_id, reply = task_manager.run_sync(req.message)
+        task_id, reply = task_manager.run_sync(req.message, private=private)
         task = task_manager.task(task_id) or {}
         status = normalize_task_status(task.get("status", "FAILED"))
-        return {"task_id": task_id, "status": status, "reply": reply}
+        return {
+            "task_id": task_id,
+            "status": status,
+            "reply": reply,
+            "response_provider": task.get("response_provider", ""),
+            "response_model": task.get("response_model", ""),
+        }
     except TaskCapacityError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 

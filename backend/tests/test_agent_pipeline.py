@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.agent.router as router_module
 from app.agent import agent as agent_module
 from app.agent.agent import Agent
 from app.tools.registry import ToolResult
@@ -16,31 +15,44 @@ def _tool_call(name, arguments):
     return SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
 
 
-@pytest.mark.parametrize("text", ["How are you?", "Tell me what you can do?"])
-def test_conversation_is_llm_handled_with_tool_descriptions_available(monkeypatch, text):
+def test_conversation_uses_no_tool_schemas_and_capability_answer_is_local(monkeypatch):
     seen = []
+    calls = 0
 
     def fake_chat(messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            return _message('{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}')
         seen.append(tools)
         return _message("I can help with conversation and practical tasks.")
 
     monkeypatch.setattr(agent_module.client, "chat", fake_chat)
-    reply = Agent().respond(text)
+    reply = Agent().respond("How are you?")
 
     assert "I can help" in reply
     assert len(seen) == 1
-    names = {tool["function"]["name"] for tool in seen[0]}
-    assert {"search_web", "browser_open", "open_app"} <= names
+    assert seen[0] == []
+    assert "Without a language model" in Agent().respond("Tell me what you can do?")
 
 
 def test_time_request_uses_only_time_tool(monkeypatch):
     calls = []
+    responses = iter([
+        _message(tool_calls=[_tool_call("get_time", {})]),
+        _message("09:00 PM"),
+    ])
+
+    def fake_chat(_messages, tools=None, **_kwargs):
+        assert "get_time" in {item["function"]["name"] for item in tools or []}
+        return next(responses)
 
     def fake_get_time(name, args, confirmed=False):
         calls.append((name, args))
         return ToolResult("success", "09:00 PM", verification_status="verified")
 
-    monkeypatch.setattr(router_module, "run_tool_result", fake_get_time)
+    monkeypatch.setattr(agent_module.client, "chat", fake_chat)
+    monkeypatch.setattr(agent_module, "run_tool_result", fake_get_time)
     reply = Agent().respond("What time is it?")
 
     assert calls == [("get_time", {})]
@@ -52,6 +64,8 @@ def test_browser_files_request_reaches_llm_for_clarification(monkeypatch, text):
     seen = []
 
     def fake_chat(messages, tools=None):
+        if tools == []:
+            return _message('{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":true}')
         seen.append(tools)
         return _message("Do you mean downloaded files, files on a webpage, or files on your computer?")
 
@@ -64,14 +78,14 @@ def test_browser_files_request_reaches_llm_for_clarification(monkeypatch, text):
     assert "find_file" in {tool["function"]["name"] for tool in seen[0]}
 
 
-def test_whatsapp_greeting_is_drafted_and_requires_confirmation(monkeypatch):
+def test_whatsapp_message_is_confirmed_without_rewriting_user_text(monkeypatch):
     call = _tool_call("send_whatsapp_message", {"contact": "Ishan", "message": "greet him"})
     monkeypatch.setattr(agent_module.client, "chat", lambda *args, **kwargs: _message(tool_calls=[call]))
 
     reply = Agent().respond("He is my friend Ishan. Greet him.")
 
     assert "Send this to Ishan?" in reply
-    assert "Hello Ishan, how are you?" in reply
+    assert "greet him" in reply
     assert agent_module.agent is not None
 
 
@@ -97,6 +111,7 @@ def test_weather_uses_weather_tool_and_final_natural_response(monkeypatch):
     responses = iter([
         _message(tool_calls=[tool_call]),
         _message("Today's weather in Kathmandu is clear and mild."),
+        _message('{"user_requires_tool":false,"assistant_claimed_unverified_result":false,"assistant_asked_clarification":false}'),
     ])
 
     def fake_chat(messages, tools=None):

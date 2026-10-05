@@ -38,19 +38,41 @@ def test_invalid_gemini_key_falls_back_to_groq(monkeypatch):
 
     result = asyncio.run(llm.chat([{"role": "user", "content": "Hello"}]))
 
-    assert result == {"provider": "Groq", "text": "groq answer", "tool_calls": []}
+    assert result == {"provider": "Groq", "model": config.GROQ_MODEL, "text": "groq answer", "tool_calls": []}
+    assert providers == ["Gemini", "Groq"]
+
+
+def test_rate_limit_falls_back_to_next_configured_provider(monkeypatch):
+    class RateLimitError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "gemini-key", raising=False)
+    monkeypatch.setattr(config, "GROQ_API_KEY", "groq-key", raising=False)
+    providers = []
+
+    def get_client(provider):
+        providers.append(provider)
+        if provider == "Gemini":
+            return _FakeClient(RateLimitError("rate limit"))
+        return _FakeClient(_response("groq reply"))
+
+    monkeypatch.setattr(llm, "_client", get_client)
+
+    result = asyncio.run(llm.chat([{"role": "user", "content": "Hello"}]))
+
+    assert result == {"provider": "Groq", "model": config.GROQ_MODEL, "text": "groq reply", "tool_calls": []}
     assert providers == ["Gemini", "Groq"]
 
 
 def test_chat_sync_reuses_persistent_loop_across_calls(monkeypatch):
     async def fake_chat(*args, **kwargs):
-        return {"provider": "Ollama", "text": "reply", "tool_calls": []}
+        return {"provider": "Ollama", "model": config.OLLAMA_MODEL, "text": "reply", "tool_calls": []}
 
     monkeypatch.setattr(llm, "chat", fake_chat)
     first = llm.chat_sync([{"role": "user", "content": "one"}])
     second = llm.chat_sync([{"role": "user", "content": "two"}])
 
-    assert first == {"provider": "Ollama", "text": "reply", "tool_calls": []}
+    assert first == {"provider": "Ollama", "model": config.OLLAMA_MODEL, "text": "reply", "tool_calls": []}
     assert second == first
 
 
@@ -97,6 +119,7 @@ def test_normalize_response_keeps_provider_and_tool_call_shape(monkeypatch):
 
     assert llm._normalize_response(response, "Groq") == {
         "provider": "Groq",
+        "model": "",
         "text": "Answer",
         "tool_calls": [{
             "id": "call-42",

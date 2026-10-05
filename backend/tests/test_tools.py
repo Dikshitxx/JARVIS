@@ -33,9 +33,9 @@ def test_classify_credential_content_blocks():
     assert "credential" in reason
 
 
-def test_classify_normal_fact_allows():
+def test_classify_memory_write_requires_confirmation():
     decision, _ = classify("remember_fact", {"content": "User likes tea"})
-    assert decision == "ALLOW"
+    assert decision == "CONFIRM"
 
 
 def test_classify_open_app_allowlisted():

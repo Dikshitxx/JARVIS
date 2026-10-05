@@ -500,6 +500,7 @@ register(Tool(
     resource="desktop",
     side_effect=True,
     retry_safe=True,
+    metadata={"direct_routes": {"open_application": {"name": "$request.target"}}, "offline_summary": "open a named local application"},
 ))
 
 

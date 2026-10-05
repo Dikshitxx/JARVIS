@@ -115,19 +115,21 @@ class BrowserSession:
 
     def existing_pages(self) -> list[dict]:
         """Read already-open pages without launching a browser context."""
-        def read_pages():
-            pages = []
-            if self._context is None:
-                return pages
-            for key, page in self._pages.items():
-                try:
-                    if not page.is_closed():
-                        pages.append({"key": key, "page": page})
-                except Exception:
-                    continue
-            return pages
+        return self.run(self.current_pages)
 
-        return self.run(read_pages)
+    def current_pages(self) -> list[dict]:
+        """Return mapped and user-opened pages; call on the browser owner thread."""
+        if self._context is None:
+            return []
+        keys = {id(page): key for key, page in self._pages.items()}
+        pages = []
+        for index, page in enumerate(self._context.pages):
+            try:
+                if not page.is_closed():
+                    pages.append({"key": keys.get(id(page), f"page:{index + 1}"), "page": page})
+            except Exception:
+                continue
+        return pages
 
     def set_page(self, key: str, page) -> None:
         self._pages[key] = page

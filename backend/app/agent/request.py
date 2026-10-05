@@ -125,6 +125,20 @@ _OPEN_PROJECT_RE = re.compile(
 _PLAY_RE = re.compile(r"^(?:play|put\s+on)\s+(.+)$", re.I)
 _CONTROL_RE = re.compile(r"^(pause|resume|stop|continue)\s+(.+)$", re.I)
 _TYPE_RE = re.compile(r"^(?:type|write|enter)\s+(.+)$", re.I)
+_BROWSER_TYPE_RE = re.compile(
+    r"^(?:type|write|enter)\s+(.+?)\s+(?:in|into)\s+(.+?)(?:\s+tab)?$",
+    re.I,
+)
+_CLOSE_TAB_RE = re.compile(
+    r"^(?:close|shut)\s+(?:(?:that|this|the|my)\s+)?"
+    r"(?:(?:current|active|open|opened)\s+)?(?:(?:browser|brave|chrome|edge)\s+)?tab$",
+    re.I,
+)
+_CAPABILITY_REQUEST_RE = re.compile(
+    r"^(?:(?:tell\s+me\s+)?(?:what|which)\s+(?:can|could|do)\s+you\s+(?:do|help with)|"
+    r"tell\s+me\s+what\s+you\s+can\s+do)\b.*$",
+    re.I,
+)
 _APP_SEARCH_SUFFIX_RE = re.compile(
     r"^(?:search|find|look\s+up)\s+(?:for\s+)?(.+?)\s+(?:in|on|using)\s+(brave(?:\s+browser)?|chrome|google\s+chrome|edge|microsoft\s+edge)$",
     re.I,
@@ -153,6 +167,14 @@ _NEWS_REQUEST_RE = re.compile(
     r"^(?:(?:tell|show|give)\s+me\s+|what(?:'s|\s+is)\s+)?"
     r"(?:the\s+)?(?:(?:latest|recent|current|today'?s?)\s+)?news"
     r"(?:\s+(?:about|on)\s+(.+?))?(?:\s+(?:today|now|right\s+now))?$",
+    re.I,
+)
+_CURRENT_FACT_LOOKUP_RE = re.compile(
+    r"^(?:(?:can|could)\s+you\s+|please\s+)?(?:check|find\s+out|look\s+up)\s+(.+)$",
+    re.I,
+)
+_CURRENT_FACT_HINT_RE = re.compile(
+    r"\b(?:current(?:ly)?|latest|recent|today|right\s+now|this\s+year|this\s+month)\b",
     re.I,
 )
 _COPY_APPLICATION_TEXT_RE = re.compile(
@@ -221,6 +243,7 @@ _NOTEPAD_TYPE_CLEAR_RE = re.compile(
 def normalize_user_text(text: str) -> str:
     value = unicodedata.normalize("NFKC", text or "").replace("’", "'").replace("‘", "'")
     value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"^(?:(?:okay|ok|just|simply|now)\s+)+", "", value, flags=re.I)
     value = _LEADING_POLITENESS.sub("", value)
     value = re.sub(r"[?!]+$", "", value).strip()
     if value.endswith(".") and not re.search(r"\b\d+\.\d+\.$", value):
@@ -290,6 +313,11 @@ def _media_query(value: str) -> str:
     return query.strip()
 
 
+def _search_query(value: str) -> str:
+    query = _TRAILING_POLITENESS.sub("", value.strip().rstrip(".!?")).strip()
+    return re.sub(r"^(?:the|a|an|some)\s+", "", query, flags=re.I).strip()
+
+
 def _base(
     raw: str,
     normalized: str,
@@ -349,6 +377,17 @@ def _parse_one(
 ) -> UserRequest:
     normalized = normalize_user_text(raw)
     analysis = analysis_override or analyze_utterance(raw, context)
+
+    if _CAPABILITY_REQUEST_RE.fullmatch(normalized):
+        return _base(raw, normalized, analysis, intent="list_capabilities")
+
+    if _CLOSE_TAB_RE.fullmatch(normalized):
+        target = str(context.get("current_target") or context.get("browser_target") or "")
+        return _base(
+            raw, normalized, analysis, intent="close_browser_tab", target=target,
+            target_type="browser_tab", entities=(Entity("browser_tab", target),) if target else (),
+            capabilities=frozenset({"browser"}),
+        )
 
     text_clear = _NOTEPAD_TYPE_CLEAR_RE.fullmatch(normalized)
     if text_clear:
@@ -489,6 +528,27 @@ def _parse_one(
             analysis_override=info_analysis,
         )
 
+    tell_about = re.match(r"^tell\s+me\s+about\s+(.+)$", normalized, re.I)
+    if tell_about and analysis.kind != "information":
+        query = _search_query(tell_about.group(1))
+        info_analysis = replace(analysis, kind="information", has_action=False, refers_to_context=False)
+        return _base(
+            raw, normalized, info_analysis, kind="INFORMATION_REQUEST", intent="search_web",
+            query=query, entities=(Entity("query", query),), capabilities=frozenset({"browser"}),
+            analysis_override=info_analysis,
+        )
+
+    current_lookup = _CURRENT_FACT_LOOKUP_RE.fullmatch(normalized)
+    if current_lookup and _CURRENT_FACT_HINT_RE.search(current_lookup.group(1)):
+        query = _search_query(current_lookup.group(1))
+        if query and not re.search(r"\bweather\b", query, re.I):
+            info_analysis = replace(analysis, kind="information", has_action=False, refers_to_context=False)
+            return _base(
+                raw, normalized, info_analysis, kind="INFORMATION_REQUEST", intent="search_web",
+                query=query, entities=(Entity("query", query),), capabilities=frozenset({"browser"}),
+                analysis_override=info_analysis,
+            )
+
     if analysis.refers_to_context and re.match(r"^(?:search|find|look up)\b", normalized, re.I):
         from app.agent.runtime_context import contextual_browser_intent
 
@@ -573,7 +633,7 @@ def _parse_one(
 
     web_search = _WEB_SEARCH_RE.match(normalized)
     if web_search:
-        query = web_search.group(1).strip()
+        query = _search_query(web_search.group(1))
         selected_browser = str(context.get("current_browser") or "").lower()
         explicitly_general = bool(re.match(
             r"^(?:search|look up)\s+(?:the\s+web|online|the\s+internet)\s+for\b",
@@ -776,6 +836,23 @@ def _parse_one(
             target_type="application", capabilities=frozenset({"clipboard", "windows"}),
         )
 
+    browser_type = _BROWSER_TYPE_RE.match(normalized)
+    if browser_type:
+        text = browser_type.group(1).strip().strip("'\"` ")
+        raw_target = browser_type.group(2).strip().strip("'\"`.,!? ")
+        raw_target = re.sub(
+            r"^(?:(?:my|the)\s+)?(?:(?:opened|open|current|active)\s+)?",
+            "", raw_target, flags=re.I,
+        )
+        target = resolve_target(raw_target)
+        if text and target is not None:
+            return _base(
+                raw, normalized, analysis, intent="browser_type_text",
+                entities=(Entity("text", text), Entity("website", target.name)),
+                target=target.name, target_type="website", query=text,
+                capabilities=frozenset({"browser"}),
+            )
+
     match = _TYPE_RE.match(normalized)
     if match:
         text = match.group(1).strip().strip("'\"` ")
@@ -797,7 +874,11 @@ def _parse_one(
     if analysis.kind == "information":
         lowered = normalized.lower()
         capability = "media" if re.search(r"\b(song|track|video|currently playing)\b", lowered) else "information"
-        return _base(raw, normalized, analysis, intent="information_request", capabilities=frozenset({capability}))
+        return _base(
+            raw, normalized, analysis, intent="information_request",
+            query=normalized, entities=(Entity("query", normalized),),
+            capabilities=frozenset({capability}),
+        )
 
     if analysis.kind in {"action", "follow_up", "mixed"}:
         lowered = normalized.lower()

@@ -1,4 +1,5 @@
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -224,8 +225,11 @@ def test_youtube_adapter_retries_playback_once_and_verifies_state():
 
 
 def test_generic_engine_has_no_youtube_or_whatsapp_selectors():
-    browser_source = open("app/tools/browser.py", encoding="utf-8").read().lower()
-    whatsapp_source = open("app/tools/whatsapp.py", encoding="utf-8").read().lower()
+    from pathlib import Path
+
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    browser_source = (app_dir / "tools" / "browser.py").read_text(encoding="utf-8").lower()
+    whatsapp_source = (app_dir / "tools" / "whatsapp.py").read_text(encoding="utf-8").lower()
     assert "ytd-video-renderer" not in browser_source
     assert "data-tab" not in whatsapp_source
 
@@ -274,31 +278,31 @@ def test_chat_adapter_reports_login_before_interaction():
     assert result.status == "authentication_required"
 
 
-def test_generic_open_website_does_not_guess_foreground_browser(monkeypatch):
+def test_generic_open_website_uses_registered_direct_route(monkeypatch):
     from app.agent import agent as agent_module
     from app.agent import runtime_context
+    from app.tools.registry import REGISTRY
 
     runtime_context.update_context(current_browser="", current_target="", browser_target="")
+    exposed = []
 
-    captured = []
-    original_update_context = runtime_context.update_context
+    def fake_chat(_messages, tools=None, **_kwargs):
+        exposed.extend(schema["function"]["name"] for schema in tools or [])
+        return SimpleNamespace(content="", tool_calls=[SimpleNamespace(function=SimpleNamespace(
+            name="browser_open", arguments={"target": "youtube"},
+        ))])
 
-    def capture_update_context(**kwargs):
-        captured.append(kwargs.copy())
-        return original_update_context(**kwargs)
-
-    monkeypatch.setattr("app.tools.apps.get_active_window_info", lambda: {"application": "brave.exe", "pid": 42})
-    monkeypatch.setattr("app.tools.apps.resolve_application_name", lambda value: "brave" if str(value).lower() in {"brave", "brave.exe"} else None)
-    monkeypatch.setattr("app.tools.browser_session.is_managed_browser_process", lambda pid: False)
-    monkeypatch.setattr(runtime_context, "update_context", capture_update_context)
-    monkeypatch.setattr(agent_module, "try_fast_route", lambda *args, **kwargs: ("browser_open", ToolResult("success", "Opened youtube."), {"target": "youtube"}))
-    monkeypatch.setattr(agent_module, "run_tool_result", lambda *args, **kwargs: ToolResult("success", "Opened youtube."))
+    monkeypatch.setattr(agent_module.client, "chat", fake_chat)
+    monkeypatch.setattr(REGISTRY["browser_open"], "func", lambda target: ToolResult(
+        "success", f"Opened {target}.", verification_status="verified",
+    ))
+    monkeypatch.setattr(runtime_context, "record_action", lambda *_args, **_kwargs: {})
 
     agent = agent_module.Agent()
     reply = agent.respond("Open YouTube")
 
     assert reply == "Opened youtube."
-    assert any(kwargs.get("current_browser") == "Brave" for kwargs in captured)
+    assert exposed == []
 
 
 def test_edge_is_registered_as_a_local_launchable_and_closable_application():

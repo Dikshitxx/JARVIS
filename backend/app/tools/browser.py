@@ -11,7 +11,7 @@ from app.core import config
 from app.tools.apps import _process_names, focus_app, get_active_window_info, open_app, resolve_application_name
 from app.tools.browser_adapters import adapter_for
 from app.tools.browser_session import get_browser_session
-from app.tools.browser_targets import resolve_target
+from app.tools.browser_targets import resolve_target, target_matches_url
 from app.tools.registry import Tool, ToolResult, register
 
 log = logging.getLogger("jarvis.browser")
@@ -38,9 +38,11 @@ def _launch_brave(url: str, action: str, query: str = "") -> ToolResult:
             page = session.page("browser_navigation", url)
             expected_host = (urlparse(url).hostname or "").lower().removeprefix("www.")
             actual_host = (urlparse(page.url).hostname or "").lower().removeprefix("www.")
-            if page.url == "about:blank" or not expected_host or not (
-                actual_host == expected_host or actual_host.endswith(f".{expected_host}")
-            ):
+            target = resolve_target(url)
+            host_matches = target_matches_url(target, page.url) if target else bool(
+                expected_host and (actual_host == expected_host or actual_host.endswith(f".{expected_host}"))
+            )
+            if page.url == "about:blank" or not host_matches:
                 return ToolResult(
                     "failure", f"Sent navigation to {url}, but couldn't verify the page URL.",
                     data={"url": page.url, "query": query}, action=action, target=url,
@@ -281,6 +283,49 @@ def browser_interaction(target: str, query: str) -> ToolResult:
     return _run_target(target, "interact", query)
 
 
+def browser_type_text(target: str, text: str) -> ToolResult:
+    website = resolve_target(target)
+    if website is None or website.adapter != "chat":
+        return ToolResult("clarification_required", f"I don't recognize an open conversation tab for '{target}'.")
+    if not text:
+        return ToolResult("invalid_action", "No text was provided.")
+    session = get_browser_session()
+    try:
+        return session.run(lambda: adapter_for(session, website).type_text(text))
+    except Exception as exc:
+        return ToolResult("failure", f"Could not type into {website.name}: {exc}", verification_status="failed")
+
+
+def close_browser_tab(target: str = "") -> ToolResult:
+    session = get_browser_session()
+
+    def close():
+        pages = session.current_pages()
+        if not target:
+            return ToolResult("clarification_required", "Which open browser tab should I close?")
+        matches = [item for item in pages if item.get("key", "").casefold() == target.casefold()]
+        website = resolve_target(target)
+        if not matches and website is not None:
+            matches = [item for item in pages if target_matches_url(website, item["page"].url)]
+        if not matches:
+            return ToolResult("failure", f"I couldn't find the tracked browser tab '{target}'. Nothing was closed.", verification_status="failed")
+        if len(matches) > 1:
+            return ToolResult("clarification_required", f"More than one '{target}' tab is open. Specify which one to close.")
+        page = matches[0]["page"]
+        try:
+            page.close()
+            if page.is_closed():
+                return ToolResult("success", f"Closed the {target} browser tab.", target=target, verification_status="verified")
+            return ToolResult("failure", f"The {target} tab remained open after the close request.", target=target, verification_status="failed")
+        except Exception as exc:
+            return ToolResult("failure", f"Could not close the {target} browser tab: {exc}", target=target, verification_status="failed")
+
+    try:
+        return session.run(close)
+    except Exception as exc:
+        return ToolResult("failure", f"Could not close the browser tab: {exc}", verification_status="failed")
+
+
 def play_youtube_song(query: str, avoid_current: bool = False, result_index: int = 0) -> ToolResult:
     target = resolve_target("youtube")
 
@@ -431,6 +476,7 @@ register(Tool(
     capabilities=frozenset({"browser"}),
     side_effect=True,
     retry_safe=True,
+    metadata={"direct_routes": {"search_web": {"query": "$request.query"}}, "offline_summary": "do web search and show current results"},
 ))
 register(Tool(
     name="fetch_web_page",
@@ -488,6 +534,7 @@ register(Tool(
     capabilities=frozenset({"browser"}),
     side_effect=True,
     retry_safe=True,
+    metadata={"direct_routes": {"open_website": {"target": "$request.target", "browser": "$modifier.browser"}}, "offline_summary": "open a supported website"},
 ))
 register(Tool(
     name="open_website_in_application",
@@ -518,6 +565,41 @@ register(Tool(
     resource="browser",
     capabilities=frozenset({"browser"}),
     side_effect=True,
+    metadata={"direct_routes": {"browser_interaction": {"target": "$request.target", "query": "$request.query"}}},
+))
+register(Tool(
+    name="browser_type_text",
+    description="Fill and verify text in a visible input on an already-open supported conversation tab. Does not press Enter or send the text. If multiple matching tabs are open, asks which one to use.",
+    parameters={
+        "type": "object",
+        "properties": {"target": {"type": "string"}, "text": {"type": "string"}},
+        "required": ["target", "text"],
+    },
+    func=browser_type_text,
+    keywords=("type into chatgpt", "type into chat tab", "fill chat input"),
+    resource="browser",
+    capabilities=frozenset({"browser"}),
+    side_effect=True,
+    metadata={
+        "direct_routes": {"browser_type_text": {"target": "$request.target", "text": "$request.query"}},
+        "offline_summary": "type text into an already-open supported browser tab",
+    },
+))
+register(Tool(
+    name="close_browser_tab",
+    description="Close one tracked tab in JARVIS's managed browser after confirmation. Requires a known tab or website target and never guesses among duplicate matching tabs.",
+    parameters={"type": "object", "properties": {"target": {"type": "string"}}},
+    func=close_browser_tab,
+    keywords=("close browser tab", "close current tab"),
+    risk="confirm",
+    resource="browser",
+    capabilities=frozenset({"browser"}),
+    side_effect=True,
+    metadata={
+        "direct_routes": {"close_browser_tab": {"target": "$context.current_target"}},
+        "offline_summary": "close one tracked browser tab after confirmation",
+        "private_safe": True,
+    },
 ))
 register(Tool(
     name="play_youtube_song",
@@ -537,6 +619,13 @@ register(Tool(
     resource="browser",
     capabilities=frozenset({"media"}),
     side_effect=True,
+    metadata={
+        "direct_routes": {"play_media_content": {
+            "query": "$request.query", "avoid_current": "$modifier.avoid_current",
+            "result_index": "$modifier.result_index",
+        }},
+        "offline_summary": "play a requested YouTube song or video",
+    },
 ))
 register(Tool(
     name="toggle_youtube_playback",
@@ -577,6 +666,13 @@ register(Tool(
     resource="browser",
     capabilities=frozenset({"media"}),
     side_effect=True,
+    metadata={
+        "direct_routes": {
+            "pause_current_media": {"action": "pause"},
+            "resume_current_media": {"action": "resume"},
+        },
+        "offline_summary": "pause or resume tracked media",
+    },
 ))
 register(Tool(
     name="search_in_application",

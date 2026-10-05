@@ -156,7 +156,7 @@ def _content_text(content) -> str:
     return str(content or "")
 
 
-def _normalize_response(response, provider: str) -> dict:
+def _normalize_response(response, provider: str, model: str = "") -> dict:
     choices = getattr(response, "choices", None) or []
     message = getattr(choices[0], "message", None) if choices else None
     tool_calls = []
@@ -176,6 +176,7 @@ def _normalize_response(response, provider: str) -> dict:
         })
     return {
         "provider": provider,
+        "model": model,
         "text": _content_text(getattr(message, "content", "")),
         "tool_calls": tool_calls,
     }
@@ -206,7 +207,7 @@ def _local_vision(image_path: str, question: str) -> dict:
 
     with vision_model_session():
         answer = vision_chat(image_path, question)
-    return {"provider": "Ollama", "text": answer, "tool_calls": []}
+    return {"provider": "Ollama", "model": config.VISION_MODEL, "text": answer, "tool_calls": []}
 
 
 async def chat(
@@ -245,7 +246,7 @@ async def chat(
                     model=model,
                     messages=_image_messages(messages, image_path),
                 )
-                return _normalize_response(response, "Gemini")
+                return _normalize_response(response, "Gemini", model)
             except Exception as exc:
                 errors.append(f"Gemini: {_safe_error(exc)}")
                 log.warning("LLM provider Gemini failed: %s", errors[-1])
@@ -295,7 +296,7 @@ async def chat(
             if response is None:
                 raise RuntimeError(f"No response received from {provider}")
             elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
-            normalized = _normalize_response(response, provider)
+            normalized = _normalize_response(response, provider, model)
             usage = getattr(response, "usage", None)
             usage_summary = {}
             if usage is not None:

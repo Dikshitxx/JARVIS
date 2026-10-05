@@ -4,7 +4,7 @@ from urllib.parse import quote_plus
 from urllib.parse import urlparse
 
 from app.core import config
-from app.tools.browser_targets import BrowserTarget
+from app.tools.browser_targets import BrowserTarget, target_matches_url
 from app.tools.registry import ToolResult
 
 
@@ -206,23 +206,134 @@ class YouTubeAdapter(GenericTargetAdapter):
 
 
 class ChatAdapter(GenericTargetAdapter):
+    _COMPOSER_SELECTORS = (
+        "#prompt-textarea",
+        "[data-testid='composer-text-input']",
+        "[contenteditable='true'][data-placeholder*='Message' i]",
+        "textarea",
+        "input[type='text']",
+        "[contenteditable='true']",
+    )
+
+    def _pages(self):
+        if hasattr(self.session, "current_pages"):
+            return self.session.current_pages()
+        if hasattr(self.session, "existing_pages"):
+            return self.session.existing_pages()
+        return []
+
+    def _select_page(self, *, create: bool = False):
+        pages = [
+            item for item in self._pages()
+            if target_matches_url(self.target, str(getattr(item["page"], "url", "")))
+        ]
+        preferred = next((item for item in pages if item.get("key") == self.target.name), None)
+        if preferred:
+            return preferred["page"], ""
+        if len(pages) == 1:
+            return pages[0]["page"], ""
+        if len(pages) > 1:
+            return None, f"More than one {self.target.name} tab is open. Specify which one to use."
+        if create:
+            return self.session.page(self.target.name, self.target.canonical_url), ""
+        return None, f"I couldn't find an already-open {self.target.name} tab. I didn't type anything."
+
+    def _composer(self, page):
+        for selector in self._COMPOSER_SELECTORS:
+            try:
+                field = page.locator(selector).first
+                if not field.count():
+                    continue
+                field.wait_for(state="visible", timeout=min(config.BROWSER_INTERACTION_TIMEOUT, 2500))
+                if hasattr(field, "is_enabled") and not field.is_enabled():
+                    continue
+                return field
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _field_text(field) -> str | None:
+        try:
+            return field.input_value(timeout=1000)
+        except Exception:
+            try:
+                return field.inner_text(timeout=1000)
+            except Exception:
+                return None
+
     def open(self) -> ToolResult:
-        page = self.session.page(self.target.name, self.target.canonical_url)
+        page, error = self._select_page(create=True)
+        if error:
+            return ToolResult("clarification_required", error)
         challenge = check_challenge(page)
         if challenge:
             return challenge
         body = page.locator("body").inner_text(timeout=config.BROWSER_INTERACTION_TIMEOUT).lower()
         if any(marker in body for marker in ("log in", "sign in", "login")):
             return ToolResult("authentication_required", f"{self.target.name} requires login before interaction.")
-        if not page.locator("textarea, input[type='text']").count():
+        if self._composer(page) is None:
             return ToolResult("failure", f"{self.target.name} did not expose a usable conversation input.")
         return ToolResult("success", f"Opened {self.target.name}.", verification_status="verified")
+
+    def type_text(self, text: str) -> ToolResult:
+        page, error = self._select_page()
+        if error:
+            return ToolResult("clarification_required", error, verification_status="failed")
+        challenge = check_challenge(page)
+        if challenge:
+            return challenge
+        field = self._composer(page)
+        if field is None:
+            body = page.locator("body").inner_text(timeout=config.BROWSER_INTERACTION_TIMEOUT).lower()
+            if any(marker in body for marker in ("log in", "sign in", "login")):
+                return ToolResult("authentication_required", f"{self.target.name} requires login before interaction.")
+            return ToolResult("failure", f"I couldn't find a visible input in the open {self.target.name} tab.", verification_status="failed")
+        try:
+            field.fill(text)
+            if self._field_text(field) == text:
+                return ToolResult(
+                    "success", f"Typed and verified {len(text)} characters in the open {self.target.name} tab.",
+                    target=self.target.name, verification_status="verified",
+                )
+            return ToolResult(
+                "failure", f"The text did not match the input in the open {self.target.name} tab.",
+                target=self.target.name, verification_status="failed",
+            )
+        except Exception as exc:
+            return ToolResult("failure", f"Could not type into the open {self.target.name} tab: {exc}", verification_status="failed")
 
     def interact(self, query: str) -> ToolResult:
         ready = self.open()
         if ready.status != "success":
             return ready
-        return super().interact(query)
+        page, error = self._select_page()
+        if error:
+            return ToolResult("clarification_required", error)
+        field = self._composer(page)
+        if field is None:
+            return ToolResult("failure", f"I couldn't find a usable input in {self.target.name}.", verification_status="failed")
+        try:
+            field.fill(query)
+            if self._field_text(field) != query:
+                return ToolResult("failure", f"I couldn't verify the prompt in {self.target.name}'s input.", verification_status="failed")
+            field.press("Enter")
+            page.wait_for_function(
+                "query => Array.from(document.querySelectorAll('main *')).some(element => "
+                "element.children.length === 0 && element.innerText?.trim() === query && "
+                "!element.closest('[contenteditable=true], textarea, input'))",
+                arg=query,
+                timeout=config.BROWSER_INTERACTION_TIMEOUT,
+            )
+            return ToolResult(
+                "success", f"Sent and verified the message in {self.target.name}.",
+                target=self.target.name, verification_status="verified",
+            )
+        except Exception:
+            return ToolResult(
+                "failure", f"I submitted the prompt to {self.target.name}, but couldn't verify it appeared in the conversation.",
+                target=self.target.name, verification_status="failed",
+            )
 
     def search(self, query: str) -> ToolResult:
         return self.interact(query)

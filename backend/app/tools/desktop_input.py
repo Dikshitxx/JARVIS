@@ -258,6 +258,12 @@ register(Tool(
     },
     func=type_text,
     side_effect=True,
+    metadata={
+        "direct_routes": {"type_text": {
+            "text": "$entity.text", "target_window": "$request.target",
+        }},
+        "offline_summary": "type into a named desktop window",
+    },
 ))
 
 register(Tool(

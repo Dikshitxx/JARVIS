@@ -44,6 +44,7 @@ TASK_STATUS_ALIASES = {
 TASK_FIELDS = {
     "status", "resolved_intent", "selected_capabilities", "target", "current_step",
     "result", "error", "cancellation_requested", "timed_out", "resumable",
+    "response_provider", "response_model",
 }
 
 
@@ -92,6 +93,7 @@ def _connect() -> sqlite3.Connection:
         "resolved_intent TEXT NOT NULL DEFAULT '', selected_capabilities TEXT NOT NULL DEFAULT '[]', "
         "target TEXT NOT NULL DEFAULT '', current_step TEXT NOT NULL DEFAULT '', "
         "result TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', "
+        "response_provider TEXT NOT NULL DEFAULT '', response_model TEXT NOT NULL DEFAULT '', "
         "cancellation_requested INTEGER NOT NULL DEFAULT 0, timed_out INTEGER NOT NULL DEFAULT 0, "
         "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
     )
@@ -109,6 +111,10 @@ def _connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE tasks ADD COLUMN timed_out INTEGER NOT NULL DEFAULT 0")
     if "resumable" not in {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}:
         conn.execute("ALTER TABLE tasks ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0")
+    if "response_provider" not in {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}:
+        conn.execute("ALTER TABLE tasks ADD COLUMN response_provider TEXT NOT NULL DEFAULT ''")
+    if "response_model" not in {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}:
+        conn.execute("ALTER TABLE tasks ADD COLUMN response_model TEXT NOT NULL DEFAULT ''")
     if "side_effect" not in {row[1] for row in conn.execute("PRAGMA table_info(task_steps)")}:
         conn.execute("ALTER TABLE task_steps ADD COLUMN side_effect INTEGER NOT NULL DEFAULT 0")
     return conn
@@ -227,7 +233,7 @@ class TaskManager:
         self._futures: dict[str, Future] = {}
         self._events: dict[str, threading.Event] = {}
 
-    def submit(self, request: str) -> str:
+    def submit(self, request: str, private: bool = False) -> str:
         task_id = create_task(request)
         with self._lock:
             active_ids = [key for key, future in self._futures.items() if not future.done()]
@@ -239,7 +245,7 @@ class TaskManager:
             initial_context = runtime_context.activate_request(task_id)
             cancel_event = threading.Event()
             self._events[task_id] = cancel_event
-            future = self._executor.submit(self._run, task_id, request, cancel_event, initial_context)
+            future = self._executor.submit(self._run, task_id, request, cancel_event, initial_context, private)
             self._futures[task_id] = future
             future.add_done_callback(lambda _future, key=task_id: self._discard_runtime_state(key))
             completed = [key for key, item in self._futures.items() if item.done()]
@@ -247,9 +253,17 @@ class TaskManager:
                 self._futures.pop(completed.pop(0), None)
         return task_id
 
-    def _run(self, task_id: str, request: str, cancel_event: threading.Event, initial_context: dict) -> str:
+    def _run(
+        self, task_id: str, request: str, cancel_event: threading.Event,
+        initial_context: dict, private: bool = False,
+    ) -> str:
         from app.agent.agent import agent
+        from app.agent import privacy
         from app.agent import runtime_context
+        from app.llm import llm
+        private = private or agent.has_private_pending()
+        if not private:
+            private = privacy.should_keep_local(request)
 
         def mark_timeout():
             cancel_event.set()
@@ -261,7 +275,11 @@ class TaskManager:
             )
 
         timer: threading.Timer | None = None
-        with task_scope(task_id, cancel_event), runtime_context.request_context_scope(task_id, initial_context):
+        with (
+            task_scope(task_id, cancel_event),
+            runtime_context.request_context_scope(task_id, initial_context, commit=not private),
+            llm.private_request_scope(private),
+        ):
             update_task(task_id, status="RUNNING", current_step="Understanding request", resumable=False)
             timer = threading.Timer(self._timeout_seconds, mark_timeout)
             timer.daemon = True
@@ -285,6 +303,17 @@ class TaskManager:
                     update_task(task_id, result=reply)
                 return reply
             steps = task_steps(task_id)
+            latest_attempts = []
+            for step in steps:
+                signature = (
+                    step["tool_name"],
+                    json.dumps(step["arguments"], sort_keys=True, separators=(",", ":"), default=str),
+                )
+                if latest_attempts and latest_attempts[-1][0] == signature:
+                    latest_attempts[-1] = (signature, step)
+                else:
+                    latest_attempts.append((signature, step))
+            steps = [step for _signature, step in latest_attempts]
             failures = [step for step in steps if step["status"] not in {"success", "waiting_confirmation"}]
             blocked = [step for step in failures if step["status"] in {"clarification_required", "authentication_required", "invalid_action"}]
             unverified = [step for step in steps if step["side_effect"] and step["verification"] == "unknown"]
@@ -310,8 +339,8 @@ class TaskManager:
         with self._lock:
             self._events.pop(task_id, None)
 
-    def run_sync(self, request: str) -> tuple[str, str]:
-        task_id = self.submit(request)
+    def run_sync(self, request: str, private: bool = False) -> tuple[str, str]:
+        task_id = self.submit(request, private=private)
         with self._lock:
             future = self._futures.get(task_id)
         if future is None:

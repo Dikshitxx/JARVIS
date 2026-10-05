@@ -12,7 +12,7 @@ from app.api.routes import chat
 from app.core import config
 from app.llm import client as llm_client
 from app.memory import store
-from app.tasks import TaskManager, create_task, normalize_task_status, task_scope, task_manager, update_task
+from app.tasks import TaskManager, append_step, create_task, normalize_task_status, task_scope, task_manager, update_task
 from app.tools import apps, registry
 from app.tools.registry import Tool, ToolResult, register, run_tool_result
 
@@ -110,6 +110,35 @@ def test_task_cancellation_is_cooperative_and_keeps_result_truthful(isolated_dat
     assert "finished" in task["result"].lower()
 
 
+@pytest.mark.parametrize(
+    ("attempts", "reply", "expected_status"),
+    [
+        (["failure", "success"], "I couldn't get the video to play.", "SUCCEEDED"),
+        (["failure"], "Video started playing.", "FAILED"),
+    ],
+)
+def test_task_status_uses_latest_tool_attempt_not_model_wording(
+    isolated_database, monkeypatch, attempts, reply, expected_status,
+):
+    manager = TaskManager(workers=1, queued=1, timeout_seconds=5)
+    task_id = create_task("play the video")
+    arguments = {"query": "example song"}
+    for status in attempts:
+        append_status = "success" if status == "success" else "failure"
+        append_step(
+            task_id, tool_name="play_youtube_song", capability="media",
+            arguments=arguments, status=append_status, result=status,
+            verification="verified" if append_status == "success" else "failed",
+            side_effect=True,
+        )
+    initial_context = runtime_context.activate_request(task_id)
+    monkeypatch.setattr(agent_module.agent, "respond", lambda _request: reply)
+
+    manager._run(task_id, "play the video", threading.Event(), initial_context)
+
+    assert manager.task(task_id)["status"] == expected_status
+
+
 def test_unverified_side_effect_is_not_retried_unless_declared_safe(monkeypatch):
     name = "test_nonretryable_side_effect"
     calls = []
@@ -195,7 +224,10 @@ def test_background_task_status_uses_canonical_lifecycle_names():
     assert normalize_task_status("interrupted") == "INTERRUPTED"
 
 
-def test_background_chat_returns_immediate_progress_response():
+def test_background_chat_returns_immediate_progress_response(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.task_manager, "submit", lambda _request, private=False: "test-task")
     response = chat(type("Req", (), {"message": "Research this topic and prepare an email.", "background": True})())
 
     assert response["status"] == "QUEUED"
